@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_name: str = "ONCM Workbench"
+    app_env: str = "production"  # development = allow the insecure defaults below (local only)
     app_base_url: str = "http://localhost:8000"
     secret_key: str = "change-me"
     two_person_rule: bool = True
@@ -59,15 +60,48 @@ class Settings(BaseSettings):
     # Gmail: smtp.gmail.com : 587 (STARTTLS) with an App Password (Google Account > Security > 2-Step Verification > App passwords).
     alert_smtp_host: str = ""
     alert_smtp_port: int = 587          # 587 = STARTTLS, 465 = implicit SSL
-    alert_smtp_user: str = ""           # the sender mailbox, e.g. komatibhavanishankar@gmail.com
+    alert_smtp_user: str = ""           # the sender mailbox, e.g. alerts@example.org
     alert_smtp_password: str = ""       # app password - NEVER commit this
     alert_smtp_use_tls: bool = True
     alert_mail_from: str = ""           # defaults to ALERT_SMTP_USER (Gmail always rewrites From to the signed-in account)
     alert_from_name: str = "ONCM Workbench Alerts"
     alert_recipients: str = ""          # comma-separated; seeded ONCE on first start, then managed in the UI
 
+    # ---- Search: "db" = title and document code; "engine" = adds full text via adaptive-search-engine ----
+    search_backend: str = "db"
+    search_engine_url: str = "http://localhost:8080"
+    search_engine_token: str = ""
+    # Virus scanning of every upload: "clamav" (clamd, see docker-compose.yml) or "off"
+    malware_scan: str = "off"
+    clamav_host: str = "clamav"
+    clamav_port: int = 3310
+
+    # OCR for scanned PDFs and images (needs the tesseract program; skipped when it is not installed)
+    ocr_enabled: bool = True
+    ocr_languages: str = "eng"          # tesseract codes joined by "+", e.g. eng+hin (install tesseract-ocr-hin)
+    ocr_max_pages: int = 30             # scanned pages read per document
+
 
 settings = Settings()
+
+_DEFAULT_SECRET_KEYS = {"", "change-me", "change-me-to-a-long-random-string"}
+_DEFAULT_MASTER_PASSWORD = "ChangeMe!12345"
+
+
+def check_secrets(s: Settings) -> list[str]:
+    """Insecure-default problems. Raises outside APP_ENV=development (anyone could forge tokens or sign in as Master
+    Admin); returns them in development so the caller can log a warning."""
+    problems = []
+    if s.secret_key in _DEFAULT_SECRET_KEYS or len(s.secret_key) < 32:
+        problems.append("SECRET_KEY is a default or shorter than 32 characters "
+                        '(generate one: python -c "import secrets; print(secrets.token_urlsafe(48))")')
+    if s.master_admin_password == _DEFAULT_MASTER_PASSWORD:
+        problems.append("MASTER_ADMIN_PASSWORD is the default ChangeMe!12345")
+    if s.search_backend == "engine" and len(s.search_engine_token) < 32:
+        problems.append("SEARCH_BACKEND=engine needs a SEARCH_ENGINE_TOKEN of 32+ characters (the engine holds document text)")
+    if problems and s.app_env.strip().lower() != "development":
+        raise RuntimeError("Refusing to start: " + "; ".join(problems) + ". Set them in .env, or APP_ENV=development for local use.")
+    return problems
 
 
 def _db_url(url: str) -> str:

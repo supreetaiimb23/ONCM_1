@@ -25,7 +25,7 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 def health():
     return {"status": "ok", "storage": settings.storage_backend, "email": "smtp" if settings.smtp_host else "log-only",
-            "alerts": "smtp" if alerts.smtp_configured() else "log-only"}
+            "alerts": "smtp" if alerts.smtp_configured() else "log-only", "search": settings.search_backend}
 
 
 class LoginIn(BaseModel):

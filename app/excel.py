@@ -5,11 +5,12 @@ from io import BytesIO
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import (AccessRequest, AuditLog, ChangeLog, ChecklistItem, Document, DocumentReview, DocumentVersion,
                         Notification, Organization, Task, User, Workstream)
-from app.services import STAGE_GROUP, can_see_doc, doc_code, latest_maker_id
+from app.services import STAGE_GROUP, by_id, doc_code, latest_maker_ids, visible_docs_clause
 
 def _aw(x):
     return x if x is None or x.tzinfo else x.replace(tzinfo=timezone.utc)
@@ -63,14 +64,22 @@ def build_workbook(db: Session, user: User, org_id=None, actor_type=None, stage=
     dids = [d.id for d in docs]
     dmap = {d.id: d for d in docs}
 
+    cl_done, cl_total = {}, {}
+    if oids:
+        for oid, done, n in (db.query(ChecklistItem.organization_id, ChecklistItem.done, func.count())
+                             .filter(ChecklistItem.organization_id.in_(oids))
+                             .group_by(ChecklistItem.organization_id, ChecklistItem.done)):
+            cl_total[oid] = cl_total.get(oid, 0) + n
+            if done:
+                cl_done[oid] = cl_done.get(oid, 0) + n
+
     wb = Workbook()
     wb.remove(wb.active)
     _sheet(wb, "Participant Tracker",
            ["Organization", "Actor type", "Stage", "Waiting on", "ONCM contact", "Contact email", "Account status",
             "Checklist done", "Last updated"],
            [[o.name, o.actor_type, o.stage, o.waiting_on, admins.get(o.assigned_admin_id), o.contact_email, o.status,
-             "{}/{}".format(db.query(ChecklistItem).filter_by(organization_id=o.id, done=True).count(),
-                            db.query(ChecklistItem).filter_by(organization_id=o.id).count()), o.updated_at] for o in orgs])
+             "{}/{}".format(cl_done.get(o.id, 0), cl_total.get(o.id, 0)), o.updated_at] for o in orgs])
     _sheet(wb, "Document Register",
            ["Document ID", "Code", "Organization", "Folder", "Title", "Type", "Version", "Status", "Uploaded", "Reviewer", "Due date"],
            [[d.id, doc_code(d), onames.get(d.organization_id), d.category, d.title, d.doc_type, d.current_version, d.status,
@@ -78,24 +87,35 @@ def build_workbook(db: Session, user: User, org_id=None, actor_type=None, stage=
     # ---- knowledge repository (respects each admin's category permissions)
     aids = None if user.role == "master_admin" else [o.id for o in db.query(Organization).filter(Organization.assigned_admin_id == user.id)]
     wsn = {w.id: w.name for w in db.query(Workstream)}
-    repo = [d for d in db.query(Document).order_by(Document.id).all() if can_see_doc(user, d, aids)
-            and (not date_from or _aw(d.created_at) >= _aw(date_from)) and (not date_to or _aw(d.created_at) <= _aw(date_to))]
+    rq = db.query(Document)
+    vis = visible_docs_clause(user, aids)
+    if vis is not None:
+        rq = rq.filter(vis)
+    repo = [d for d in rq.order_by(Document.id).all()
+            if (not date_from or _aw(d.created_at) >= _aw(date_from)) and (not date_to or _aw(d.created_at) <= _aw(date_to))]
+    makers = latest_maker_ids(db, repo)
+    repo_orgs = by_id(db, Organization, (d.organization_id for d in repo))
     _sheet(wb, "Repository Register",
            ["Code", "Title", "Category", "Access level", "Stage", "Status", "Workstream", "Maker", "Checker", "Approver",
             "Classification confirmed", "Organization", "Updated"],
            [[doc_code(d), d.title, d.repo_category, d.access_level, STAGE_GROUP.get(d.status), d.status, wsn.get(d.workstream_id),
-             admins.get(latest_maker_id(db, d)), admins.get(d.assigned_reviewer_id), admins.get(d.approver_id),
-             d.classification_confirmed_at, db.get(Organization, d.organization_id).name if d.organization_id else "", d.updated_at] for d in repo])
+             admins.get(makers[d.id]), admins.get(d.assigned_reviewer_id), admins.get(d.approver_id),
+             d.classification_confirmed_at, repo_orgs[d.organization_id].name if d.organization_id else "", d.updated_at] for d in repo])
     visible_ids = {d.id for d in repo}
     cl = [c for c in db.query(ChangeLog).order_by(ChangeLog.id.desc()).limit(2000)
           if all(i in visible_ids for i in (c.document_id, c.supersedes_document_id) if i)]
+    cl_docs = by_id(db, Document, [i for c in cl for i in (c.document_id, c.supersedes_document_id)])
     _sheet(wb, "Change Log", ["When", "Title", "Decision", "Document", "Supersedes", "Workstream", "Recorded by"],
-           [[c.created_at, c.title, c.decision, doc_code(db.get(Document, c.document_id)) if c.document_id else "",
-             doc_code(db.get(Document, c.supersedes_document_id)) if c.supersedes_document_id else "",
+           [[c.created_at, c.title, c.decision, doc_code(cl_docs[c.document_id]) if c.document_id else "",
+             doc_code(cl_docs[c.supersedes_document_id]) if c.supersedes_document_id else "",
              wsn.get(c.workstream_id), admins.get(c.recorded_by)] for c in cl])
+    ws_docs = dict(db.query(Document.workstream_id, func.count()).filter(Document.workstream_id != None)  # noqa: E711
+                   .group_by(Document.workstream_id).all())
+    ws_tasks = dict(db.query(Task.workstream_id, func.count()).filter(Task.workstream_id != None, Task.status != "done")  # noqa: E711
+                    .group_by(Task.workstream_id).all())
     _sheet(wb, "Workstreams", ["Workstream", "Owner", "Status", "Documents", "Open tasks"],
-           [[w.name, admins.get(w.owner_id), w.status, db.query(Document).filter_by(workstream_id=w.id).count(),
-             db.query(Task).filter(Task.workstream_id == w.id, Task.status != "done").count()] for w in db.query(Workstream).order_by(Workstream.name)])
+           [[w.name, admins.get(w.owner_id), w.status, ws_docs.get(w.id, 0), ws_tasks.get(w.id, 0)]
+            for w in db.query(Workstream).order_by(Workstream.name)])
     revs = (db.query(DocumentReview).filter(DocumentReview.document_id.in_(dids)).order_by(DocumentReview.id).all()
             if dids else [])
     _sheet(wb, "Approval History",
@@ -117,8 +137,9 @@ def build_workbook(db: Session, user: User, org_id=None, actor_type=None, stage=
                [[n.event, n.recipient, n.status, n.attempts, n.last_error, n.created_at] for n in ns])
     if user.role == "master_admin" or user.can_share:
         ar = db.query(AccessRequest).order_by(AccessRequest.id.desc()).limit(2000).all()
+        ar_docs = by_id(db, Document, (r.document_id for r in ar))
         _sheet(wb, "Access Requests", ["Requested", "Document", "Requester", "Email", "Organization", "Source", "Status", "Decided", "Valid until"],
-               [[r.created_at, doc_code(db.get(Document, r.document_id)), r.requester_name, r.requester_email, r.requester_org,
+               [[r.created_at, doc_code(ar_docs[r.document_id]), r.requester_name, r.requester_email, r.requester_org,
                  r.source, r.status, r.decided_at, r.expires_at] for r in ar])
     if user.role == "master_admin":
         logs = db.query(AuditLog).order_by(AuditLog.id.desc()).limit(5000).all()

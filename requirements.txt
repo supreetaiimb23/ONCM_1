@@ -10,3 +10,7 @@ PyJWT==2.10.1
 bcrypt==4.2.1
 boto3==1.35.90
 openpyxl==3.1.5
+alembic==1.20.0
+pypdf==6.21.1
+pypdfium2==5.13.0               # OCR: renders scanned PDF pages
+pillow==12.3.0

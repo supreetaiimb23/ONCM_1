@@ -6,3 +6,7 @@ data/*
 !data/.gitkeep
 storage/*
 !storage/.gitkeep
+.pytest_cache/
+test-results/
+.DS_Store
+.claude/

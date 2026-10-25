@@ -5,12 +5,13 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app import search
 from app.core import get_db, participant_user
 from datetime import timedelta
 from app.models import (AccessRequest, ChecklistItem, Document, DocumentVersion, Notification, Organization, Task, User)
-from app.services import (ACCESS_LEVELS, CATEGORIES, FOLDER_TO_CODE, STAGES, active_shares, add_version, audit,
-                          catalogue_docs, check_transition, doc_code, doc_out, new_document, notify, participant_resources,
-                          shared_mailbox, storage, utcnow, version_row, row)
+from app.services import (ACCESS_LEVELS, CATEGORIES, FOLDER_TO_CODE, STAGES, active_shares, add_version, assign_serial,
+                          audit, catalogue_docs, check_transition, doc_code, doc_out, lock_document, new_document, notify,
+                          participant_resources, read_validated, shared_mailbox, storage, utcnow, version_row, row)
 
 router = APIRouter(prefix="/api/me")
 
@@ -22,8 +23,8 @@ def _org(db, u) -> Organization:
     return o
 
 
-def _own_doc(db, u, doc_id) -> Document:
-    d = db.get(Document, doc_id)
+def _own_doc(db, u, doc_id, lock=False) -> Document:
+    d = lock_document(db, doc_id) if lock else db.get(Document, doc_id)
     # participants only ever touch documents THEY submitted for their own organization
     if not d or d.organization_id != u.organization_id or d.origin != "participant":
         raise HTTPException(404, "Document not found")
@@ -62,15 +63,17 @@ def my_documents(u: User = Depends(participant_user), db: Session = Depends(get_
 
 
 @router.post("/documents", status_code=201)
-async def upload(category: str = Form(...), title: str = Form(...), doc_type: str = Form(""),
-                 file: UploadFile = File(...), u: User = Depends(participant_user), db: Session = Depends(get_db)):
+def upload(category: str = Form(...), title: str = Form(...), doc_type: str = Form(""),
+           file: UploadFile = File(...), u: User = Depends(participant_user), db: Session = Depends(get_db)):
     o = _org(db, u)
     if category not in CATEGORIES:
         raise HTTPException(400, "Unknown category")
+    upload_ = read_validated(file)
     d = new_document(db, FOLDER_TO_CODE[category], organization_id=o.id, category=category, title=title.strip()[:250],
                      doc_type=doc_type[:100], origin="participant", status="submitted", created_by=u.id,
                      assigned_reviewer_id=o.assigned_admin_id, access_level="restricted")  # submissions are confidential by default
-    await add_version(db, d, file, u)
+    add_version(db, d, upload_, u)
+    assign_serial(db, d)
     o.waiting_on = "oncm"
     if o.stage == "joined":
         o.stage = "documents_in_progress"
@@ -86,13 +89,15 @@ async def upload(category: str = Form(...), title: str = Form(...), doc_type: st
 
 
 @router.post("/documents/{doc_id}/versions", status_code=201)
-async def replace(doc_id: int, file: UploadFile = File(...), u: User = Depends(participant_user), db: Session = Depends(get_db)):
+def replace(doc_id: int, file: UploadFile = File(...), u: User = Depends(participant_user), db: Session = Depends(get_db)):
     o = _org(db, u)
-    d = _own_doc(db, u, doc_id)
+    _own_doc(db, u, doc_id)  # 404 before reading the file
+    upload_ = read_validated(file)
+    d = _own_doc(db, u, doc_id, lock=True)
     if d.status not in ("changes_requested", "rejected", "submitted"):
         raise HTTPException(409, "This document can't be replaced in its current status")
     check_transition(d.status, "submitted") if d.status != "submitted" else None
-    ver = await add_version(db, d, file, u)
+    ver = add_version(db, d, upload_, u)
     d.status = "submitted"
     o.waiting_on = "oncm"
     reviewer = db.get(User, o.assigned_admin_id) if o.assigned_admin_id else None
@@ -119,10 +124,14 @@ LEVEL_LABEL = {"pilot_shared": "Shared with all pilot participants", "role_speci
 
 
 @router.get("/resources")
-def resources(u: User = Depends(participant_user), db: Session = Depends(get_db)):
+def resources(q: str = "", u: User = Depends(participant_user), db: Session = Depends(get_db)):
     o = _org(db, u)
+    pairs = participant_resources(db, u, o)
+    if q.strip():  # only within what this participant can already open
+        rank = {doc_id: n for n, doc_id in enumerate(search.matching_ids(db, q))}
+        pairs = sorted((p for p in pairs if p[0].id in rank), key=lambda p: rank[p[0].id])
     out = []
-    for d, s in participant_resources(db, u, o):
+    for d, s in pairs:
         x = doc_out(db, d, True)
         x.update(audience=s.audience, audience_label=LEVEL_LABEL[s.audience], shared_version=s.version)
         out.append(x)
@@ -143,13 +152,17 @@ def download_resource(doc_id: int, u: User = Depends(participant_user), db: Sess
 
 
 @router.get("/catalogue")
-def request_catalogue(u: User = Depends(participant_user), db: Session = Depends(get_db)):
+def request_catalogue(q: str = "", u: User = Depends(participant_user), db: Session = Depends(get_db)):
     """Request-only resources: title and code are visible, the file is not until a request is approved."""
     _org(db, u)
     mine = {r.document_id: r for r in db.query(AccessRequest).filter_by(user_id=u.id).order_by(AccessRequest.id)}
     have = {d.id for d, _ in participant_resources(db, u, db.get(Organization, u.organization_id))}
+    docs = catalogue_docs(db, "request_only")
+    if q.strip():  # title and code only: searching file text would reveal what is inside before access is granted
+        rank = {doc_id: n for n, doc_id in enumerate(search.matching_ids(db, q, full_text=False))}
+        docs = sorted((p for p in docs if p[0].id in rank), key=lambda p: rank[p[0].id])
     out = []
-    for d, s in catalogue_docs(db, "request_only"):
+    for d, s in docs:
         r = mine.get(d.id)
         out.append({"id": d.id, "code": doc_code(d), "title": d.title, "repo_category_name": doc_out(db, d, True)["repo_category_name"],
                     "request_status": "approved" if d.id in have else (r.status if r else None)})

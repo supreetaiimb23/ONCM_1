@@ -1,7 +1,7 @@
 """Database tables (work on SQLite locally and on Supabase PostgreSQL)."""
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 
@@ -128,6 +128,7 @@ class Document(Base):
 
 class DocumentVersion(Base):
     __tablename__ = "document_versions"
+    __table_args__ = (Index("uq_doc_version", "document_id", "version", unique=True),)  # also ensured on start (main.py)
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id"), index=True)
     version = Column(Integer, nullable=False)

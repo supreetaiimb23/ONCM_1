@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from app import alerts
 from app.core import get_db, hash_password, master_user
 from app.models import AuditLog, Document, JoinRequest, Organization, User
-from app.services import (ADMIN_DEFAULT_REPO, REPO_CATEGORIES, audit, doc_out, invite_link, make_checklist, notify, row,
-                          TRANSITIONS, user_out)
+from app.services import (ADMIN_DEFAULT_REPO, REPO_CATEGORIES, audit, doc_out, invite_link, lock_document, make_checklist,
+                          notify, row, TRANSITIONS, user_out)
 
 router = APIRouter(prefix="/api/master")
 
@@ -162,7 +162,7 @@ class OverrideIn(BaseModel):
 @router.post("/documents/{doc_id}/override")
 def override(doc_id: int, body: OverrideIn, u: User = Depends(master_user), db: Session = Depends(get_db)):
     """Exceptional case: force a document status. Reason is mandatory and audited."""
-    d = db.get(Document, doc_id)
+    d = lock_document(db, doc_id)
     if not d:
         raise HTTPException(404, "Document not found")
     if body.status not in TRANSITIONS:

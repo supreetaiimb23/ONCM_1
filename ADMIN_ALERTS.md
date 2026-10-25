@@ -4,7 +4,7 @@ A second, dedicated email sender that keeps your admins informed. When something
 
 ```
  Workbench event ──► alert queue (after DB commit) ──► alert SMTP sender ──► recipient 1
-                                                       komatibhavanishankar@gmail.com      recipient 2
+                                                       alerts@example.org                  recipient 2
                                                                                            recipient N …
 ```
 
@@ -56,14 +56,14 @@ Because alerts are hooked into the existing `notify()` function, **every other e
 
 ## Set-up (about 5 minutes)
 
-1. **Create a Gmail App Password for the sender** (`komatibhavanishankar@gmail.com`): turn on 2-Step Verification, then Google Account → Security → App passwords → create one. Copy the 16-character code.
+1. **Create a Gmail App Password for the sender** (`alerts@example.org`): turn on 2-Step Verification, then Google Account → Security → App passwords → create one. Copy the 16-character code.
 2. **Edit `.env`:**
    ```
    ALERT_SMTP_HOST=smtp.gmail.com
    ALERT_SMTP_PORT=587
-   ALERT_SMTP_USER=komatibhavanishankar@gmail.com
+   ALERT_SMTP_USER=alerts@example.org
    ALERT_SMTP_PASSWORD=abcd efgh ijkl mnop
-   ALERT_RECIPIENTS=bhavanisankarkomati@gmail.com,komatibhavanisankar04@gmail.com
+   ALERT_RECIPIENTS=admin1@example.org,admin2@example.org
    ```
 3. **Restart:** `docker compose up -d --build`. The two new tables (`alert_recipients`, `alert_log`) are created automatically; existing tables are not changed.
 4. Sign in as Master Admin → **Admin alerts** → **Send test** next to each recipient.
@@ -86,7 +86,7 @@ Category keys: `joins`, `organisations`, `documents`, `access_requests`, `suppor
 
 ## Things to know
 - **Gmail limits.** A personal Gmail account can send roughly 500 emails a day. Alerts are one email per recipient per event, so with many recipients and busy periods consider choosing categories per recipient, or a transactional provider (Amazon SES, which you may already use for `SMTP_*`) by changing only `ALERT_SMTP_*`.
-- **From address.** Gmail always sends as the signed-in account, so alerts arrive from `komatibhavanishankar@gmail.com`. First alerts may land in spam; mark them "Not spam".
+- **From address.** Gmail always sends as the signed-in account, so alerts arrive from `alerts@example.org`. First alerts may land in spam; mark them "Not spam".
 - **Google Workspace accounts** can have App Passwords disabled by the domain admin.
 - **Alerts contain organisation contact details**, so add only trusted ONCM staff as recipients.
 - **Recipients are not re-seeded on restart.** `ALERT_RECIPIENTS` is read only when the recipient table is empty, so a recipient you removed on purpose does not come back.

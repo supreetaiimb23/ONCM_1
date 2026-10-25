@@ -6,34 +6,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from sqlalchemy import inspect, text
 from fastapi.staticfiles import StaticFiles
 
-from app.core import SessionLocal, engine, hash_password, settings
-from app.models import AccessRequest, AlertLog, Base, Document, Notification, Task, User
-from app import alerts
+from app.core import SessionLocal, check_secrets, hash_password, settings
+from app.models import AccessRequest, AlertLog, Document, Notification, Task, User
+from app import alerts, search
+from app.migrate import migrate
 from app.routers import admin, master, participant, public
 from app.routers import alerts as alerts_router
 from app.services import _pool, deliver, notify, shared_mailbox, storage
 
 log = logging.getLogger("oncm")
-
-
-def add_missing_columns():
-    """Tiny forward-only migration: adds any new model column that an existing database table does not have yet
-    (so upgrading the app never needs a manual ALTER TABLE). Safe to run on every start."""
-    insp = inspect(engine)
-    with engine.begin() as conn:
-        for table in Base.metadata.sorted_tables:
-            if not insp.has_table(table.name):
-                continue
-            have = {c["name"] for c in insp.get_columns(table.name)}
-            for col in table.columns:
-                if col.name in have:
-                    continue
-                ddl_type = col.type.compile(dialect=engine.dialect)
-                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {ddl_type}'))
-                log.warning("Added column %s.%s", table.name, col.name)
 
 
 def seed_master():
@@ -140,7 +123,7 @@ def poll_mailbox():
 
 def loop():
     while True:
-        for fn in (worker_tick, poll_mailbox):
+        for fn in (worker_tick, poll_mailbox, search.sync_if_needed):
             try:
                 fn()
             except Exception:  # never kill the worker thread
@@ -150,10 +133,15 @@ def loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(engine)
-    add_missing_columns()
+    for problem in check_secrets(settings):  # raises outside APP_ENV=development
+        log.warning("INSECURE (APP_ENV=development): %s", problem)
+    if settings.malware_scan != "clamav":
+        log.warning("MALWARE_SCAN=%s: uploads are not virus-scanned", settings.malware_scan)
+    migrate()  # Alembic: creates or upgrades the schema (app/migrate.py)
     storage()  # fail fast on bad storage config
     seed_master()
+    if search.enabled():
+        search._pool.submit(search.sync_all)  # background: a new or emptied engine catches up
     alerts.seed_recipients()
     threading.Thread(target=loop, daemon=True).start()
     yield

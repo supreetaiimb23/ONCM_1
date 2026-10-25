@@ -5,18 +5,20 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, EmailStr
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app import alerts
+from app import alerts, search
 from app.core import admin_user, get_db, make_token, settings
 from app.excel import build_workbook
 from app.models import (AccessRequest, ChangeLog, ChecklistItem, Document, DocumentGrant, DocumentReview,
                         DocumentShare, DocumentVersion, Notification, Organization, Task, User, Workstream)
 from app.services import (ACCESS_LEVELS, ACTOR_TYPES, ALLOWED_LEVELS, CATEGORIES, DEFAULT_LEVEL, REPO_CATEGORIES,
-                          STAGES, STAGE_GROUP, active_shares, add_version, admin_repo_codes, audit, can_see_doc,
-                          catalogue_docs, check_transition, close_review_tasks, doc_code, doc_out, ensure_review_task,
-                          invite_link, latest_maker_id, log_change, new_document, notify, notify_doc_owners, row,
-                          shared_mailbox, storage, utcnow, validate_classification, version_row)
+                          STAGES, STAGE_GROUP, active_shares, add_version, admin_repo_codes, assign_serial, audit,
+                          can_see_doc, catalogue_docs, check_transition, close_review_tasks, doc_code, doc_out, doc_out_many,
+                          ensure_review_task, invite_link, latest_maker_id, lock_document, log_change, new_document, notify,
+                          notify_doc_owners, read_validated, row, shared_mailbox, storage, utcnow, validate_classification,
+                          version_row, visible_docs_clause)
 
 router = APIRouter(prefix="/api/admin")
 MASTER = "master_admin"
@@ -39,8 +41,9 @@ def assigned_ids(db, user):
     return [o.id for o in org_query(db, user).all()]
 
 
-def get_doc(db, user, doc_id) -> Document:
-    d = db.get(Document, doc_id)
+def get_doc(db, user, doc_id, lock=False) -> Document:
+    """lock=True for anything that changes the document: concurrent changes then take turns (see lock_document)."""
+    d = lock_document(db, doc_id) if lock else db.get(Document, doc_id)
     if not d or not can_see_doc(user, d, assigned_ids(db, user) if user.role != MASTER else None):
         raise HTTPException(404, "Document not found or not within your permissions")
     return d
@@ -73,20 +76,21 @@ def overview(u: User = Depends(admin_user), db: Session = Depends(get_db)):
     for t in tq.filter(Task.due_date != None).all():  # noqa: E711
         dd = t.due_date if t.due_date.tzinfo else t.due_date.replace(tzinfo=now_.tzinfo)
         overdue += dd < now_
-    aids = ids if u.role != MASTER else None
-    visible = [d for d in db.query(Document).all() if can_see_doc(u, d, aids)]
+    vis = visible_docs_clause(u, ids if u.role != MASTER else None)
+    dq = db.query(Document.status, func.count()).group_by(Document.status)
+    by_status = dict((dq.filter(vis) if vis is not None else dq).all())
     can_decide = u.role == MASTER or u.can_share
     return {
         "organizations": len(orgs),
         "live": sum(o.stage == "live" for o in orgs),
         "pending_join_requests": db.query(JoinRequest).filter_by(status="pending").count() if u.role == MASTER else None,
-        "awaiting_review": sum(d.status in ("submitted", "under_review") for d in visible),
-        "changes_requested": sum(d.status == "changes_requested" for d in visible),
+        "awaiting_review": by_status.get("submitted", 0) + by_status.get("under_review", 0),
+        "changes_requested": by_status.get("changes_requested", 0),
         "pending_access_requests": db.query(AccessRequest).filter_by(status="pending").count() if can_decide else None,
         "overdue_tasks": overdue,
         "failed_emails": db.query(Notification).filter_by(status="failed").count() if u.role == MASTER else None,
         "by_stage": {s: sum(o.stage == s for o in orgs) for s in STAGES},
-        "repository": {g: sum(STAGE_GROUP.get(d.status) == g for d in visible)
+        "repository": {g: sum(n for s, n in by_status.items() if STAGE_GROUP.get(s) == g)
                        for g in ("draft", "internal_review", "approved", "published", "archive")},
     }
 
@@ -129,7 +133,7 @@ def organization(org_id: int, u: User = Depends(admin_user), db: Session = Depen
     o = get_org(db, u, org_id)
     return {**row(o),
             "checklist": [row(c) for c in db.query(ChecklistItem).filter_by(organization_id=o.id).order_by(ChecklistItem.id)],
-            "documents": [doc_out(db, d) for d in db.query(Document).filter_by(organization_id=o.id).order_by(Document.id.desc())],
+            "documents": doc_out_many(db, db.query(Document).filter_by(organization_id=o.id).order_by(Document.id.desc())),
             "tasks": [row(t) for t in db.query(Task).filter_by(organization_id=o.id).order_by(Task.id.desc())]}
 
 
@@ -284,25 +288,25 @@ def documents(status: str = "", stage: str = "", repo_category: str = "", workst
                      (Document.workstream_id, workstream_id), (Document.organization_id, organization_id)):
         if val:
             qq = qq.filter(col == val)
-    if q:
-        qq = qq.filter(Document.title.ilike(f"%{q}%"))
+    rank = None
+    if q.strip():  # code, title and (SEARCH_BACKEND=engine) file text, best match first; permissions still apply below
+        rank = {doc_id: n for n, doc_id in enumerate(search.matching_ids(db, q))}
+        qq = qq.filter(Document.id.in_(list(rank) or [0]))
     if mine:
         qq = qq.filter((Document.assigned_reviewer_id == u.id) | (Document.approver_id == u.id))
     aids = assigned_ids(db, u) if u.role != MASTER else None
-    out = []
-    for d in qq.order_by(Document.updated_at.desc()).limit(1000).all():
-        if stage and STAGE_GROUP.get(d.status) != stage:
-            continue
-        if can_see_doc(u, d, aids):
-            out.append(doc_out(db, d))
-    return out[:500]
+    out = [d for d in qq.order_by(Document.updated_at.desc()).limit(1000).all()
+           if (not stage or STAGE_GROUP.get(d.status) == stage) and can_see_doc(u, d, aids)]
+    if rank is not None:
+        out.sort(key=lambda d: rank[d.id])
+    return doc_out_many(db, out[:500])
 
 
 @router.post("/documents", status_code=201)
-async def admin_upload(title: str = Form(...), repo_category: str = Form(...), doc_type: str = Form(""),
-                       organization_id: Optional[int] = Form(None), workstream_id: Optional[int] = Form(None),
-                       access_level: str = Form(""), target_actor_types: str = Form(""),
-                       file: UploadFile = File(...), u: User = Depends(admin_user), db: Session = Depends(get_db)):
+def admin_upload(title: str = Form(...), repo_category: str = Form(...), doc_type: str = Form(""),
+                 organization_id: Optional[int] = Form(None), workstream_id: Optional[int] = Form(None),
+                 access_level: str = Form(""), target_actor_types: str = Form(""),
+                 file: UploadFile = File(...), u: User = Depends(admin_user), db: Session = Depends(get_db)):
     """New repository document. It starts as an internal DRAFT and gets a code like ONCM-POL-2026-V1-0003."""
     if repo_category not in REPO_CATEGORIES:
         raise HTTPException(400, "Unknown repository category")
@@ -316,10 +320,12 @@ async def admin_upload(title: str = Form(...), repo_category: str = Form(...), d
     types = csv_list(target_actor_types)
     validate_classification(repo_category, level, types)
     folder = (CATEGORIES[1] if repo_category == "AGR" else CATEGORIES[2]) if organization_id else REPO_CATEGORIES[repo_category]
+    upload = read_validated(file)
     d = new_document(db, repo_category, organization_id=organization_id or None, category=folder, title=title.strip()[:250],
                      doc_type=doc_type[:100], origin="admin", status="draft", created_by=u.id, access_level=level,
                      target_actor_types=types or None, workstream_id=workstream_id or None)
-    await add_version(db, d, file, u)
+    add_version(db, d, upload, u)
+    assign_serial(db, d)
     audit(db, u, "document.created", "document", d.id, {"code": doc_code(d), "level": level})
     db.commit()
     return doc_out(db, d)
@@ -355,7 +361,7 @@ class DocPatch(BaseModel):
 
 @router.patch("/documents/{doc_id}")
 def patch_document(doc_id: int, body: DocPatch, u: User = Depends(admin_user), db: Session = Depends(get_db)):
-    d = get_doc(db, u, doc_id)
+    d = get_doc(db, u, doc_id, lock=True)
     if d.status not in ("draft", "submitted", "under_review", "changes_requested"):
         raise HTTPException(409, "Classification is locked once approved. Ask the Master Admin to override.")
     if body.title:
@@ -373,11 +379,13 @@ def patch_document(doc_id: int, body: DocPatch, u: User = Depends(admin_user), d
 
 
 @router.post("/documents/{doc_id}/versions", status_code=201)
-async def admin_new_version(doc_id: int, file: UploadFile = File(...), u: User = Depends(admin_user), db: Session = Depends(get_db)):
-    d = get_doc(db, u, doc_id)
+def admin_new_version(doc_id: int, file: UploadFile = File(...), u: User = Depends(admin_user), db: Session = Depends(get_db)):
+    get_doc(db, u, doc_id)  # 404 before reading the file
+    upload = read_validated(file)
+    d = get_doc(db, u, doc_id, lock=True)
     if d.origin != "admin" or d.status not in ("draft", "changes_requested"):
         raise HTTPException(409, "Only internal drafts can receive a new version here")
-    ver = await add_version(db, d, file, u)
+    ver = add_version(db, d, upload, u)
     if d.status == "changes_requested":
         d.status = "draft"
     d.classification_confirmed_by = d.classification_confirmed_at = None
@@ -394,7 +402,7 @@ class AssignIn(BaseModel):
 
 @router.post("/documents/{doc_id}/assign")
 def assign(doc_id: int, body: AssignIn, u: User = Depends(admin_user), db: Session = Depends(get_db)):
-    d = get_doc(db, u, doc_id)
+    d = get_doc(db, u, doc_id, lock=True)
     if u.role != MASTER and (body.approver_id or (body.reviewer_id and body.reviewer_id != u.id)):
         raise HTTPException(403, "Only the Master Admin can assign other reviewers or approvers")
     maker = latest_maker_id(db, d)
@@ -431,7 +439,7 @@ class ReviewIn(BaseModel):
 
 @router.post("/documents/{doc_id}/review")
 def review(doc_id: int, body: ReviewIn, u: User = Depends(admin_user), db: Session = Depends(get_db)):
-    d = get_doc(db, u, doc_id)
+    d = get_doc(db, u, doc_id, lock=True)
     dec = body.decision
     maker = latest_maker_id(db, d)
     code = doc_code(d)
@@ -518,7 +526,7 @@ def _unpublish(db, d):
 
 @router.post("/documents/{doc_id}/archive")
 def archive(doc_id: int, body: ReasonIn, u: User = Depends(admin_user), db: Session = Depends(get_db)):
-    d = get_doc(db, u, doc_id)
+    d = get_doc(db, u, doc_id, lock=True)
     need_reason(body.reason)
     check_transition(d.status, "archived")
     _unpublish(db, d)
@@ -534,7 +542,7 @@ def archive(doc_id: int, body: ReasonIn, u: User = Depends(admin_user), db: Sess
 def restore(doc_id: int, body: ReasonIn, u: User = Depends(admin_user), db: Session = Depends(get_db)):
     if u.role != MASTER:
         raise HTTPException(403, "Only the Master Admin can restore archived documents")
-    d = get_doc(db, u, doc_id)
+    d = get_doc(db, u, doc_id, lock=True)
     need_reason(body.reason)
     check_transition(d.status, "draft")
     d.status = "draft"
@@ -566,7 +574,7 @@ def publish(doc_id: int, body: PublishIn, u: User = Depends(admin_user), db: Ses
     """Repository configuration: applies the APPROVED access classification. Publication can never be broader than approved."""
     if u.role != MASTER and not u.can_share:
         raise HTTPException(403, "You are not authorised to configure repository access")
-    d = get_doc(db, u, doc_id)
+    d = get_doc(db, u, doc_id, lock=True)
     if d.status not in ("internally_approved", "shared_externally") or not d.classification_confirmed_at:
         raise HTTPException(409, "Only approved documents with a confirmed access classification can be published")
     level = d.access_level
@@ -620,7 +628,7 @@ def add_grants(doc_id: int, body: PublishIn, u: User = Depends(admin_user), db: 
     """Authorise further groups/individuals on an already published Restricted document."""
     if u.role != MASTER and not u.can_share:
         raise HTTPException(403, "You are not authorised to configure repository access")
-    d = get_doc(db, u, doc_id)
+    d = get_doc(db, u, doc_id, lock=True)
     sh = next(iter(active_shares(db, d.id)), None)
     if not sh or sh.audience != "restricted":
         raise HTTPException(409, "Only published Restricted documents take named grants")
@@ -657,7 +665,7 @@ def revoke(share_id: int, u: User = Depends(admin_user), db: Session = Depends(g
     sh = db.get(DocumentShare, share_id)
     if not sh:
         raise HTTPException(404, "Share not found")
-    d = get_doc(db, u, sh.document_id)
+    d = get_doc(db, u, sh.document_id, lock=True)
     sh.status = "revoked"
     db.flush()
     if not active_shares(db, d.id) and d.status == "shared_externally":
@@ -755,7 +763,7 @@ def add_change(body: ChangeIn, u: User = Depends(admin_user), db: Session = Depe
     if body.supersedes_document_id:
         if not doc:
             raise HTTPException(400, "Choose the newer document that replaces the old one")
-        old = get_doc(db, u, body.supersedes_document_id)
+        old = get_doc(db, u, body.supersedes_document_id, lock=True)
         if old.id == doc.id:
             raise HTTPException(400, "A document cannot supersede itself")
         check_transition(old.status, "superseded")

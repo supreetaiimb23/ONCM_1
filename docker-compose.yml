@@ -9,8 +9,34 @@ services:
     volumes:
       - oncm_data:/srv/data           # SQLite file (only used when DATABASE_URL is sqlite)
       - oncm_storage:/srv/storage     # uploaded files (only used when STORAGE_BACKEND=local)
+    depends_on:
+      - clamav
+    restart: unless-stopped
+
+  # Virus scanner for uploads (MALWARE_SCAN=clamav). Private: no ports published. Needs ~1.5 GB RAM; on first start it
+  # downloads virus signatures for a few minutes, and uploads get "scanner not available" until it is ready.
+  clamav:
+    image: clamav/clamav:1.4.6-debian   # multi-arch (the plain tag is amd64 only)
+    container_name: oncm-clamav
+    volumes:
+      - clamav_db:/var/lib/clamav       # signatures, kept up to date by freshclam inside the container
+    restart: unless-stopped
+
+  # Full-text search (optional): docker compose --profile search up -d --build, with SEARCH_BACKEND=engine in .env.
+  # Private: no ports published, only the oncm service reaches it.
+  search:
+    profiles: ["search"]
+    build: ${SEARCH_ENGINE_DIR:-../adaptive-search-engine}
+    image: adaptive-search:latest
+    container_name: oncm-search
+    environment:
+      SEARCH_API_TOKEN: ${SEARCH_ENGINE_TOKEN:-}     # the image refuses to start without it
+    volumes:
+      - search_data:/data             # the engine's journal: indexed documents survive restarts
     restart: unless-stopped
 
 volumes:
   oncm_data:
   oncm_storage:
+  search_data:
+  clamav_db:

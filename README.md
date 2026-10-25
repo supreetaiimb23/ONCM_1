@@ -12,7 +12,19 @@ docker compose up -d --build   # 2. build and start
 ```
 
 Without Docker: `python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && uvicorn app.main:app --reload`
+The app refuses to start with the default `SECRET_KEY` (or one under 32 characters) or `MASTER_ADMIN_PASSWORD`; set `APP_ENV=development` to allow them locally.
 API docs (Swagger): http://localhost:8000/docs
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest                                   # unit + API + concurrency, fresh SQLite per run
+TEST_DATABASE_URL=postgresql://localhost/oncm_test pytest   # same suite on PostgreSQL (DB name must contain "test"; it is wiped)
+playwright install chromium && pytest -m e2e                # browser tests; or: pytest -m e2e --browser-channel chrome
+```
+
+`tests/test_concurrency.py` runs uploads in parallel against a real single-process server, as in the Docker image. Run it on PostgreSQL before every release.
 
 ## Request to join form (Organizational Profile and Scale)
 
@@ -29,6 +41,7 @@ Public page `#/join` (17 questions + contact and ONCM role). Mobile-first, stick
 | Send real emails | fill `SMTP_*` (Amazon SES SMTP works). Left empty, emails are recorded as `logged` in the Email monitor. |
 | Secondary Admin can only *recommend* | `TWO_PERSON_RULE=true` (Master Admin or the designated approver gives final approval) |
 | Read access requests from the shared mailbox | `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` (any IMAP mailbox) |
+| **Search inside files** (PDF, Word, Excel, text) | `SEARCH_BACKEND=engine`, `SEARCH_ENGINE_TOKEN`, then `docker compose --profile search up -d --build` (builds `../adaptive-search-engine`). Finds documents by meaning too ("renewable energy contract" finds a solar PPA); scanned PDFs and images are read with OCR (`OCR_*`). Default `db` searches titles and document codes. Results are always permission-filtered by ONCM. |
 | **Email admins about every update** (new organisations, decisions, onboarding, documents) | `ALERT_SMTP_*` (sender, e.g. a Gmail App Password) and `ALERT_RECIPIENTS`. See [ADMIN_ALERTS.md](ADMIN_ALERTS.md). |
 
 S3 setup: create a **private** bucket (Block all public access = on), enable versioning, and give the IAM user only `s3:PutObject`/`s3:GetObject` on that bucket. Files are always downloaded through 5-minute presigned links created after a permission check. Existing local files are not moved automatically; copy `./storage/*` into the bucket with the same keys (`aws s3 sync storage/ s3://BUCKET/`).
@@ -108,7 +121,7 @@ Approval and publication are separate: an approved document is invisible outside
 `ONCM_Workbench_Report_YYYY-MM-DD.xlsx` with sheets: Participant Tracker, Document Register, Repository Register, Change Log, Workstreams, Approval History, Pending Tasks, Access Requests, Automation Report, Audit Report. Scope follows the role (Secondary = assigned organizations). Every export is logged.
 
 ## Hardening checklist before go-live
-Change `SECRET_KEY` and the Master Admin password · serve over HTTPS · set `APP_BASE_URL` to your public URL · configure SMTP and a verified sender domain · plug a malware scanner into `scan_for_malware()` in `app/services.py` · enable Supabase backups and S3 versioning · for several app replicas, move the rate limiter and worker to Redis/a job queue.
+Set a random 32+ character `SECRET_KEY` and a non-default `MASTER_ADMIN_PASSWORD` (startup fails otherwise) · keep `APP_ENV=production` · serve over HTTPS · set `APP_BASE_URL` to your public URL · configure SMTP and a verified sender domain · `MALWARE_SCAN=clamav` with the `clamav` service (uploads are refused while the scanner is down) · enable Supabase backups and S3 versioning · for several app replicas, move the rate limiter and worker to Redis/a job queue.
 
 ## Layout
 `app/` (core, models, services, **alerts**, excel, routers/{public,participant,admin,master,**alerts**}) · `static/` (index.html, app.js) · `Dockerfile` · `docker-compose.yml` · `.env.example`

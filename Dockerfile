@@ -3,9 +3,15 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /srv
 
+# tesseract: OCR of scanned PDFs and images for full-text search (add tesseract-ocr-hin etc. for OCR_LANGUAGES)
+RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+COPY alembic.ini ./
+COPY migrations ./migrations
 COPY app ./app
 COPY static ./static
 
