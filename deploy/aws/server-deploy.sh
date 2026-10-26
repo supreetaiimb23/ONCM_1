@@ -8,10 +8,12 @@ for _ in $(seq 1 90); do [[ -f /var/lib/oncm-init-done ]] && break; sleep 10; do
 
 SITE=${SITE_ADDRESS:-${PUBLIC_IP//./-}.sslip.io}
 umask 077
-aws --region "$REGION" secretsmanager get-secret-value --secret-id "$SECRET_ID" --query SecretString --output text \
-| python3 - "$R/oncm/.env" <<PY
-import json, sys, urllib.parse
-s = json.load(sys.stdin)
+# The secret goes in through an environment variable: python3 reads its program from stdin (the heredoc)
+ONCM_SECRETS=$(aws --region "$REGION" secretsmanager get-secret-value --secret-id "$SECRET_ID" --query SecretString --output text)
+export ONCM_SECRETS
+python3 - "$R/oncm/.env" <<PY
+import json, os, sys, urllib.parse
+s = json.loads(os.environ["ONCM_SECRETS"])
 env = {
     "APP_ENV": "production",
     "APP_BASE_URL": "https://$SITE",
