@@ -1,9 +1,10 @@
 # AWS deployment (pilot)
 
-One EC2 server (`t4g.medium`, Docker Compose: app, ClamAV, search engine, Caddy for HTTPS) + RDS PostgreSQL
+One EC2 server (`c7i-flex.large`, 4 GB; Docker Compose: app, ClamAV, search engine, Caddy for HTTPS) + RDS PostgreSQL
 (`db.t4g.micro`; automated backups 7 days, or 1 day on an AWS Free plan account: `BACKUP_DAYS=1`) plus a nightly
 `pg_dump` to `s3://<bucket>/backups/` kept 30 days + private S3 bucket (files, versioned). No SSH: the server is managed through AWS
-Systems Manager. Roughly $40–50/month in `ap-south-1`; a $50/month budget emails alerts at 50% and 100%.
+Systems Manager. Roughly $80–85/month in `ap-south-1` (Free plan accounts may only use a few instance types); an $85/month budget
+emails alerts at 50% and 100%.
 
 ## 1. Credentials (once)
 Never use the root user. In the AWS console: **IAM → Users → Create user** `oncm-deployer` → *Attach policies directly*

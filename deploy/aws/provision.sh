@@ -11,8 +11,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 REGION=${REGION:-ap-south-1}
 NAME=${NAME:-oncm}
-INSTANCE_TYPE=${INSTANCE_TYPE:-t4g.medium}
-BUDGET_USD=${BUDGET_USD:-50}
+INSTANCE_TYPE=${INSTANCE_TYPE:-c7i-flex.large}  # 4 GB x86_64; Free plan accounts only allow a few types
+BUDGET_USD=${BUDGET_USD:-85}
 BACKUP_DAYS=${BACKUP_DAYS:-7}  # RDS automated backups; AWS Free plan accounts allow only 1 (nightly S3 dumps add 30 days)
 ALERT_EMAIL=${ALERT_EMAIL:?set ALERT_EMAIL (budget alerts go there)}
 ADMIN_EMAIL=${ADMIN_EMAIL:-$ALERT_EMAIL}  # the first Master Admin sign-in
@@ -121,7 +121,8 @@ echo "$DB_HOST"
 
 step "EC2 server"
 if [[ -z ${INSTANCE_ID:-} ]]; then
-  AMI=$(aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 --query Parameter.Value)
+  ARCH=$(aws ec2 describe-instance-types --instance-types "$INSTANCE_TYPE" --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures[0]')
+  AMI=$(aws ssm get-parameter --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-$ARCH" --query Parameter.Value)
   # assigned first (not inside save's arguments) so a failure stops the script under set -e
   NEW_ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$INSTANCE_TYPE" \
     --subnet-id "$SUBNET_ID" --security-group-ids "$SG_WEB" --iam-instance-profile Name="$ROLE" \
