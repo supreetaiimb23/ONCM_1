@@ -122,16 +122,19 @@ echo "$DB_HOST"
 step "EC2 server"
 if [[ -z ${INSTANCE_ID:-} ]]; then
   AMI=$(aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 --query Parameter.Value)
-  save INSTANCE_ID "$(aws ec2 run-instances --image-id "$AMI" --instance-type "$INSTANCE_TYPE" \
+  # assigned first (not inside save's arguments) so a failure stops the script under set -e
+  NEW_ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$INSTANCE_TYPE" \
     --subnet-id "$SUBNET_ID" --security-group-ids "$SG_WEB" --iam-instance-profile Name="$ROLE" \
     --metadata-options HttpTokens=required,HttpEndpoint=enabled \
-    --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=30,VolumeType=gp3,Encrypted=true,DeleteOnTermination=true}' \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$NAME}]" \
-    --user-data file://server-init.sh --query 'Instances[0].InstanceId')"
+    --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":30,"VolumeType":"gp3","Encrypted":true,"DeleteOnTermination":true}}]' \
+    --tag-specifications "[{\"ResourceType\":\"instance\",\"Tags\":[{\"Key\":\"Name\",\"Value\":\"$NAME\"}]}]" \
+    --user-data file://server-init.sh --query 'Instances[0].InstanceId')
+  save INSTANCE_ID "$NEW_ID"
 fi
 aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 if [[ -z ${EIP_ALLOC:-} ]]; then
-  save EIP_ALLOC "$(aws ec2 allocate-address --domain vpc --query AllocationId)"
+  NEW_EIP=$(aws ec2 allocate-address --domain vpc --query AllocationId)
+  save EIP_ALLOC "$NEW_EIP"
 fi
 aws ec2 associate-address --instance-id "$INSTANCE_ID" --allocation-id "$EIP_ALLOC" >/dev/null
 PUBLIC_IP=$(aws ec2 describe-addresses --allocation-ids "$EIP_ALLOC" --query 'Addresses[0].PublicIp')
