@@ -29,6 +29,42 @@ with open(sys.argv[1], "w") as f:
     f.writelines(f"{k}={v}\n" for k, v in env.items())
 PY
 
+install_backups() {
+  # Nightly pg_dump to s3://bucket/backups/ (kept 30 days by the bucket lifecycle), on top of RDS automated backups.
+  cat > /usr/local/bin/oncm-db-backup <<'SH'
+#!/bin/bash
+set -euo pipefail
+envf=/opt/oncm-current/oncm/.env
+val() { grep -m1 "^$1=" "$envf" | cut -d= -f2-; }
+url=$(val DATABASE_URL); bucket=$(val S3_BUCKET); region=$(val S3_REGION)
+key=backups/oncm-$(date -u +%Y%m%d-%H%M%S).sql.gz
+docker run --rm -e "DBURL=$url" postgres:16-alpine sh -c 'pg_dump --no-owner --no-privileges "$DBURL"' \
+  | gzip | aws --region "$region" s3 cp --quiet - "s3://$bucket/$key"
+echo "backup ok: s3://$bucket/$key"
+SH
+  chmod 700 /usr/local/bin/oncm-db-backup
+  cat > /etc/systemd/system/oncm-db-backup.service <<'UNIT'
+[Unit]
+Description=ONCM database backup to S3
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/oncm-db-backup
+UNIT
+  cat > /etc/systemd/system/oncm-db-backup.timer <<'UNIT'
+[Unit]
+Description=Nightly ONCM database backup (02:00 IST)
+[Timer]
+OnCalendar=*-*-* 20:30:00 UTC
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now oncm-db-backup.timer
+  /usr/local/bin/oncm-db-backup   # prove it works on every deploy
+}
+
 echo "== building images"
 docker build -q -t oncm-workbench:latest "$R/oncm"
 docker build -q -t adaptive-search:latest "$R/engine"
@@ -44,6 +80,7 @@ for _ in $(seq 1 60); do
     ls -1dt /opt/oncm-releases/* | tail -n +4 | xargs -r rm -rf   # keep the last 3 releases
     docker image prune -f >/dev/null
     docker compose -p oncm ps --format '{{.Service}}: {{.Status}}'
+    install_backups
     echo "LIVE: https://$SITE"
     exit 0
   fi

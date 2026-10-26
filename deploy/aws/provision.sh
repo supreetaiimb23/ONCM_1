@@ -13,6 +13,7 @@ REGION=${REGION:-ap-south-1}
 NAME=${NAME:-oncm}
 INSTANCE_TYPE=${INSTANCE_TYPE:-t4g.medium}
 BUDGET_USD=${BUDGET_USD:-50}
+BACKUP_DAYS=${BACKUP_DAYS:-7}  # RDS automated backups; AWS Free plan accounts allow only 1 (nightly S3 dumps add 30 days)
 ALERT_EMAIL=${ALERT_EMAIL:?set ALERT_EMAIL (budget alerts go there)}
 ADMIN_EMAIL=${ADMIN_EMAIL:-$ALERT_EMAIL}  # the first Master Admin sign-in
 STATE=.state
@@ -50,7 +51,8 @@ aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-conf
   '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
 aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration '{"Rules":[
   {"ID":"old-versions","Status":"Enabled","Filter":{},"NoncurrentVersionExpiration":{"NoncurrentDays":90}},
-  {"ID":"deploy-bundles","Status":"Enabled","Filter":{"Prefix":"deploy/"},"Expiration":{"Days":30}}]}'
+  {"ID":"deploy-bundles","Status":"Enabled","Filter":{"Prefix":"deploy/"},"Expiration":{"Days":30}},
+  {"ID":"db-backups","Status":"Enabled","Filter":{"Prefix":"backups/"},"Expiration":{"Days":30}}]}'
 echo "$BUCKET"
 
 step "Security groups"
@@ -109,7 +111,7 @@ if ! aws rds describe-db-instances --db-instance-identifier "$DB_ID" >/dev/null 
     --db-instance-class db.t4g.micro --allocated-storage 20 --storage-type gp3 --storage-encrypted \
     --db-name oncm --master-username oncm --master-user-password "$DB_PASSWORD" \
     --vpc-security-group-ids "$SG_DB" --db-subnet-group-name "$NAME-db" --no-publicly-accessible \
-    --backup-retention-period 7 --deletion-protection --copy-tags-to-snapshot --no-multi-az \
+    --backup-retention-period "$BACKUP_DAYS" --deletion-protection --copy-tags-to-snapshot --no-multi-az \
     --auto-minor-version-upgrade >/dev/null
   unset DB_PASSWORD
 fi
