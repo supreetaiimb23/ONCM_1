@@ -1,0 +1,7 @@
+# HTTPS in front of the app. SITE_ADDRESS is a domain name (or <ip-with-dashes>.sslip.io); Caddy gets and renews the
+# Let's Encrypt certificate itself.
+{$SITE_ADDRESS} {
+	encode gzip
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy oncm:8000
+}

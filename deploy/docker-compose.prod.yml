@@ -1,0 +1,24 @@
+# Production override: only Caddy (HTTPS) is reachable from outside.
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile search up -d
+services:
+  oncm:
+    ports: !reset []                  # no direct HTTP; Caddy reaches oncm:8000 on the compose network
+  caddy:
+    image: caddy:2.11.7-alpine
+    container_name: oncm-caddy
+    ports:
+      - "80:80"                       # ACME challenge + redirect to HTTPS
+      - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data              # certificates
+      - caddy_config:/config
+    depends_on:
+      - oncm
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

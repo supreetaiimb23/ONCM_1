@@ -10,3 +10,4 @@ storage/*
 test-results/
 .DS_Store
 .claude/
+deploy/aws/.state
