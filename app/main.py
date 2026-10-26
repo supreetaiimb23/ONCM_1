@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core import SessionLocal, check_secrets, hash_password, settings
 from app.models import AccessRequest, AlertLog, Document, Notification, Task, User
-from app import alerts, search
+from app import alerts, search, sso
 from app.migrate import migrate
 from app.routers import admin, master, participant, public
 from app.routers import alerts as alerts_router
@@ -184,7 +184,7 @@ async def security_headers(request: Request, call_next):
     return resp
 
 
-for r in (public.router, participant.router, admin.router, master.router, alerts_router.router):
+for r in (public.router, participant.router, admin.router, master.router, alerts_router.router, sso.router):
     app.include_router(r)
 
 app.mount("/", StaticFiles(directory=Path(__file__).resolve().parent.parent / "static", html=True), name="static")

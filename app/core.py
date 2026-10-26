@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     access_token_minutes: int = 480
     mfa_required_for_admins: bool = True  # admins must set up two-step verification before using admin pages
 
+    # ---- Sign in with Microsoft (Entra ID, OpenID Connect). Off until all three are set. ----
+    sso_microsoft_tenant_id: str = ""     # Directory (tenant) ID: only accounts of this organisation can sign in
+    sso_microsoft_client_id: str = ""     # Application (client) ID of the app registration
+    sso_microsoft_client_secret: str = ""
+    sso_microsoft_domains: str = ""       # optional: only these email domains may use it (comma-separated)
+    sso_required_domains: str = ""        # these email domains must use Microsoft: password sign-in is refused
+    sso_trust_microsoft_mfa: bool = False # true only if Entra Conditional Access enforces MFA for this app
+
     master_admin_email: str = "admin@example.org"
     master_admin_password: str = "ChangeMe!12345"
     master_admin_name: str = "ONCM Master Admin"
@@ -183,14 +191,15 @@ SESSION_COOKIE = "oncm_session"
 CSRF_HEADER = "x-oncm"  # browsers only let our own page's JavaScript set custom headers on cross-origin-safe requests
 
 
-def session_token(u: User) -> str:
-    return make_token(u.id, sv=u.session_version or 0)
+def session_token(u: User, ext_mfa: bool = False) -> str:
+    # ext_mfa: the identity provider (Microsoft) already did multi-factor authentication for this session
+    return make_token(u.id, sv=u.session_version or 0, **({"xmfa": True} if ext_mfa else {}))
 
 
-def set_session_cookie(response: Response, u: User):
+def set_session_cookie(response: Response, u: User, ext_mfa: bool = False):
     """The browser session: HttpOnly (page scripts cannot read it), Secure on HTTPS, SameSite=Strict (not sent by
     requests started on other sites), scoped to /api."""
-    response.set_cookie(SESSION_COOKIE, session_token(u), max_age=settings.access_token_minutes * 60, path="/api",
+    response.set_cookie(SESSION_COOKIE, session_token(u, ext_mfa), max_age=settings.access_token_minutes * 60, path="/api",
                         httponly=True, secure=settings.app_base_url.startswith("https://"), samesite="strict")
 
 
@@ -217,11 +226,13 @@ def current_user(request: Request, cred: HTTPAuthorizationCredentials | None = D
         raise HTTPException(401, "Account inactive")
     if p.get("sv", 0) != (u.session_version or 0):
         raise HTTPException(401, "Session ended. Please sign in again.")
+    u.session_claims = p  # not stored: lets mfa_setup_required see how this session was established
     return u
 
 
 def mfa_setup_required(u: User) -> bool:
-    return settings.mfa_required_for_admins and u.role != "participant" and not u.mfa_enabled
+    ext_mfa = bool(getattr(u, "session_claims", {}).get("xmfa"))  # Microsoft sign-in with enforced MFA
+    return settings.mfa_required_for_admins and u.role != "participant" and not u.mfa_enabled and not ext_mfa
 
 
 def _require_mfa(u: User):

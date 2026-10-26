@@ -32,6 +32,20 @@ The first Master Admin is `ALERT_EMAIL`; its password is in **Secrets Manager �
 ## 3. Updates
 Commit, then `deploy/aws/deploy.sh` (ships the committed code of both repos, rebuilds, restarts; ~5 minutes).
 
+## Sign in with Microsoft (Entra ID)
+Your Microsoft 365 admin (IT) creates the app registration; nothing changes in your tenant otherwise.
+1. **Entra admin center → App registrations → New registration.** Name `ONCM Workbench`; *Accounts in this
+   organizational directory only*; Redirect URI: platform **Web**, `https://<portal address>/api/auth/sso/microsoft/callback`
+   (today `https://65-1-50-137.sslip.io/api/auth/sso/microsoft/callback`; add the new one when the domain changes).
+2. **Certificates & secrets → New client secret** (24 months). Copy the secret **Value** once.
+3. Note **Application (client) ID** and **Directory (tenant) ID** (Overview page). API permissions: the default
+   `User.Read` is enough (sign-in only reads name and email).
+4. Recommended: **Conditional Access** policy requiring MFA for this app; then answer `yes` to the MFA question below.
+5. Run `deploy/aws/set-microsoft-sso.sh` and paste the values when asked (the secret is typed hidden).
+
+People sign in with Microsoft only if an ONCM admin has already created their account with the same email; roles stay
+in ONCM. Without trusted Microsoft MFA, ONCM's own two-step verification still applies.
+
 ## Later
 - **Own domain:** point an A record at the server's Elastic IP, then `SITE_ADDRESS=portal.example.org deploy/aws/deploy.sh`.
 - **Email:** verify the sender domain in Amazon SES, request production access, create SES SMTP credentials and add

@@ -29,6 +29,11 @@ env = {
     "SEARCH_BACKEND": "engine", "SEARCH_ENGINE_URL": "http://search:8080", "SEARCH_ENGINE_TOKEN": s["SEARCH_ENGINE_TOKEN"],
     "SEARCH_ENGINE_DIR": "$R/engine",
 }
+# optional: Sign in with Microsoft, stored in the same secret by deploy/aws/set-microsoft-sso.sh
+for k in ("SSO_MICROSOFT_TENANT_ID", "SSO_MICROSOFT_CLIENT_ID", "SSO_MICROSOFT_CLIENT_SECRET", "SSO_MICROSOFT_DOMAINS",
+          "SSO_REQUIRED_DOMAINS", "SSO_TRUST_MICROSOFT_MFA"):
+    if s.get(k):
+        env[k] = s[k]
 with open(sys.argv[1], "w") as f:
     f.writelines(f"{k}={v}\n" for k, v in env.items())
 PY

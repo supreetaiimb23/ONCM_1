@@ -11,7 +11,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app import mfa
+from app import mfa, sso
 from app.core import (clear_session_cookie, current_user, decode_token, get_db, hash_password, make_token, mfa_setup_required,
                       rate_limit, session_token, set_session_cookie, settings, verify_password)
 from app import alerts
@@ -26,7 +26,8 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 def health():
     return {"status": "ok", "storage": settings.storage_backend, "email": "smtp" if settings.smtp_host else "log-only",
-            "alerts": "smtp" if alerts.smtp_configured() else "log-only", "search": settings.search_backend}
+            "alerts": "smtp" if alerts.smtp_configured() else "log-only", "search": settings.search_backend,
+            "sso": ["microsoft"] if sso.enabled() else []}
 
 
 class LoginIn(BaseModel):
@@ -47,6 +48,8 @@ def _session(response: Response, u: User, return_token: bool) -> dict:
 @router.post("/auth/login")
 def login(body: LoginIn, request: Request, response: Response, db: Session = Depends(get_db)):
     rate_limit("login:" + (request.client.host if request.client else "?"), 10, 300)
+    if sso.password_sign_in_blocked(body.email):
+        raise HTTPException(403, "Accounts with this email domain sign in with Microsoft. Use 'Sign in with Microsoft'.")
     u = db.query(User).filter(func.lower(User.email) == body.email.lower()).first()
     if not u or not u.is_active or not verify_password(body.password, u.password_hash):
         raise HTTPException(401, "Incorrect email or password")
@@ -62,7 +65,7 @@ def login(body: LoginIn, request: Request, response: Response, db: Session = Dep
 
 
 class MfaLoginIn(BaseModel):
-    mfa_token: str
+    mfa_token: str = ""   # empty after "Sign in with Microsoft": the pending step is in an HttpOnly cookie
     code: str = Field(min_length=6, max_length=20)   # 6-digit authenticator code or a recovery code
     return_token: bool = False
 
@@ -85,7 +88,7 @@ def _check_second_factor(db, u: User, code: str) -> str | None:
 
 @router.post("/auth/mfa")
 def login_second_step(body: MfaLoginIn, request: Request, response: Response, db: Session = Depends(get_db)):
-    p = decode_token(body.mfa_token, "mfa")
+    p = decode_token(body.mfa_token or request.cookies.get(sso.MFA_COOKIE, ""), "mfa")
     rate_limit("mfa:" + str(p["sub"]), 5, 300)  # 5 tries per 5 minutes: a 6-digit code cannot be guessed
     u = db.get(User, int(p["sub"]))
     if not u or not u.is_active or not u.mfa_enabled or p.get("sv", 0) != (u.session_version or 0):
@@ -97,6 +100,7 @@ def login_second_step(body: MfaLoginIn, request: Request, response: Response, db
         raise HTTPException(401, "That code is not valid. Use the current code from your authenticator app, or a recovery code.")
     audit(db, u, "auth.login", "user", u.id, {"second_factor": used, "recovery_codes_left": len(u.mfa_recovery or [])})
     db.commit()
+    response.delete_cookie(sso.MFA_COOKIE, path="/api/auth/mfa")
     return _session(response, u, body.return_token)
 
 

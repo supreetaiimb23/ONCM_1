@@ -101,7 +101,7 @@ def row(o, exclude=()):
 
 
 def user_out(u: User):
-    return row(u, exclude=("password_hash", "mfa_secret", "mfa_recovery", "mfa_last_step", "session_version"))
+    return row(u, exclude=("password_hash", "mfa_secret", "mfa_recovery", "mfa_last_step", "session_version", "sso_oid"))
 
 
 # =============================================================== audit

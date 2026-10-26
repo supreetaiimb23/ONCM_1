@@ -39,6 +39,7 @@ class User(Base):
     mfa_recovery = Column(JSON, nullable=True)   # bcrypt hashes of unused one-time recovery codes
     mfa_last_step = Column(Integer)              # last accepted TOTP time step: a code cannot be used twice
     session_version = Column(Integer, default=0, server_default="0")  # +1 = every existing session is signed out
+    sso_oid = Column(String(64), index=True)     # Microsoft Entra object ID, bound at the first Microsoft sign-in
     created_at = _ts()
 
 

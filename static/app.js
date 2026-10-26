@@ -76,9 +76,12 @@ function loginView() {
   $('#app').innerHTML = authShell(`${card(`<h2 class="font-display text-2xl font-bold mb-1">Sign in</h2>
   <form id="f-login"><label class="l" for="e">Email</label><input class="field" id="e" type="email" required autocomplete="username">
   <label class="l" for="p">Password</label><input class="field" id="p" type="password" required autocomplete="current-password">
-  <button class="btn btn-primary w-full justify-center mt-5">Sign in</button></form>
+  <button class="btn btn-primary w-full justify-center mt-5">Sign in</button></form><div id="sso"></div>
   <p class="text-sm mt-4">New ONCM Consortium Partner Firm? <a href="#/join" class="underline font-semibold text-brand-600">Submit an Onboarding Request</a></p>`)}
   <p class="text-center text-sm mt-4"><a href="#/public" class="underline">Browse public resources</a></p>`);
+  api('/health').then(h => { if ((h.sso || []).includes('microsoft') && $('#sso')) $('#sso').innerHTML =
+    `<div class="flex items-center gap-3 my-4 text-xs text-neutral-500"><span class="flex-1 border-t"></span>or<span class="flex-1 border-t"></span></div>
+    <a class="btn btn-ghost w-full justify-center" href="/api/auth/sso/microsoft/start"><svg width="16" height="16" viewBox="0 0 21 21" aria-hidden="true"><path fill="#f25022" d="M1 1h9v9H1z"/><path fill="#00a4ef" d="M1 11h9v9H1z"/><path fill="#7fba00" d="M11 1h9v9h-9z"/><path fill="#ffb900" d="M11 11h9v9h-9z"/></svg>Sign in with Microsoft</a>`; }).catch(() => {});
   $('#f-login').onsubmit = run(async (e) => { e.preventDefault();
     const r = await api('/auth/login', { method: 'POST', body: { email: $('#e').value, password: $('#p').value } });
     r.mfa_required ? mfaLoginView(r.mfa_token) : setSession(); });
@@ -770,9 +773,19 @@ async function go() {
   try { await VIEWS[name](); } catch (e) { toast(e.message, true); shell(name, empty('Could not load this page: ' + e.message)); }
 }
 window.addEventListener('hashchange', () => S.user ? go() : boot());
+const SSO_ERRORS = {
+  'no-account': 'No ONCM account uses this Microsoft email. Ask ONCM to add you, then try again.',
+  'domain-not-allowed': 'This Microsoft account is not from an organisation allowed to sign in here.',
+  'account-linked-elsewhere': 'This ONCM account is linked to a different Microsoft account. Contact ONCM.',
+  'organization-suspended': "This organization's access is suspended. Contact ONCM.",
+  cancelled: 'Microsoft sign-in was cancelled.', expired: 'The sign-in took too long. Please try again.',
+};
 async function boot() {
-  const inv = new URLSearchParams(location.search).get('invite');
+  const qs = new URLSearchParams(location.search);
+  const inv = qs.get('invite');
   if (inv) return inviteView(inv);
+  if (qs.get('sso_error')) { history.replaceState(null, '', '/'); loginView(); return toast(SSO_ERRORS[qs.get('sso_error')] || 'Microsoft sign-in did not work. Please try again.', true); }
+  if (qs.get('sso') === 'mfa') { history.replaceState(null, '', '/'); return mfaLoginView(''); }
   try { S.user = await api('/auth/me'); } catch { S.user = null; }
   if (S.user) {
     if (S.user.mfa_setup_required) return mfaRequiredView();
