@@ -7,6 +7,7 @@ for _ in $(seq 1 90); do [[ -f /var/lib/oncm-init-done ]] && break; sleep 10; do
 [[ -f /var/lib/oncm-init-done ]] || { echo "server-init.sh did not finish (see /var/log/cloud-init-output.log)"; exit 1; }
 
 SITE=${SITE_ADDRESS:-${PUBLIC_IP//./-}.sslip.io}
+export SITE_ADDRESS=$SITE  # compose prefers the shell's (possibly empty) value over .env
 umask 077
 # The secret goes in through an environment variable: python3 reads its program from stdin (the heredoc)
 ONCM_SECRETS=$(aws --region "$REGION" secretsmanager get-secret-value --secret-id "$SECRET_ID" --query SecretString --output text)
