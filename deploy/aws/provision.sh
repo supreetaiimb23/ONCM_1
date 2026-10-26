@@ -25,8 +25,9 @@ step() { printf '\n== %s\n' "$*"; }
 
 ARN=$(aws sts get-caller-identity --query Arn)
 ACCOUNT=$(aws sts get-caller-identity --query Account)
-if [[ $ARN == *":root" ]]; then
-  echo "Signed in as the AWS root user. Create an IAM user and run 'aws configure' with it first." >&2
+if [[ $ARN == *":root" && ${ALLOW_ROOT:-} != 1 ]]; then
+  echo "Signed in as the AWS root user. Create an IAM user and run 'aws configure' with it first" >&2
+  echo "(or ALLOW_ROOT=1 to proceed anyway, then delete the root access keys afterwards)." >&2
   exit 1
 fi
 echo "Account $ACCOUNT as $ARN, region $REGION"
