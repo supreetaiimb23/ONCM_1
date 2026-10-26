@@ -154,3 +154,15 @@ def test_alert_categories_validated():
         alerts.clean_categories(["nope"])
     with pytest.raises(ValueError):
         alerts.clean_categories([])
+
+
+def test_s3_uploads_use_the_kms_key_when_configured(monkeypatch):
+    from app.services import S3Storage
+    calls = []
+    s3 = S3Storage.__new__(S3Storage)  # no boto3 client needed
+    s3.bucket, s3.client = "b", type("C", (), {"put_object": lambda self, **kw: calls.append(kw)})()
+    s3.save("k", b"x")
+    assert calls[-1]["ServerSideEncryption"] == "AES256"
+    monkeypatch.setattr(settings, "s3_kms_key_id", "arn:aws:kms:ap-south-1:1:key/abc")
+    s3.save("k", b"x")
+    assert calls[-1]["ServerSideEncryption"] == "aws:kms" and calls[-1]["SSEKMSKeyId"].endswith("key/abc")

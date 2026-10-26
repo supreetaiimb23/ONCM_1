@@ -36,7 +36,7 @@ R=/opt/oncm-releases/$REL; mkdir -p \$R/oncm \$R/engine
 aws s3 cp --quiet s3://$BUCKET/deploy/$REL/oncm.tar.gz - | tar xz -C \$R/oncm
 aws s3 cp --quiet s3://$BUCKET/deploy/$REL/engine.tar.gz - | tar xz -C \$R/engine
 REGION=$REGION BUCKET=$BUCKET SECRET_ID=$SECRET_ID DB_HOST=$DB_HOST PUBLIC_IP=$PUBLIC_IP \
-ADMIN_EMAIL=${ADMIN_EMAIL:-} SITE_ADDRESS=${SITE_ADDRESS:-} bash \$R/oncm/deploy/aws/server-deploy.sh \$R"
+ADMIN_EMAIL=${ADMIN_EMAIL:-} SITE_ADDRESS=${SITE_ADDRESS:-} S3_KMS_KEY_ID=${S3_KMS_KEY_ID:-} bash \$R/oncm/deploy/aws/server-deploy.sh \$R"
 CMD_ID=$(aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
   --timeout-seconds 3600 --comment "ONCM $REL" \
   --parameters "$(python3 -c 'import json,sys; print(json.dumps({"commands": [sys.argv[1]], "executionTimeout": ["3600"]}))' "$SCRIPT")" \

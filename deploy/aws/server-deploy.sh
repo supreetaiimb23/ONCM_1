@@ -24,6 +24,7 @@ env = {
     "MASTER_ADMIN_PASSWORD": s["MASTER_ADMIN_PASSWORD"],
     "DATABASE_URL": "postgresql://oncm:%s@$DB_HOST:5432/oncm?sslmode=require" % urllib.parse.quote(s["DB_PASSWORD"], safe=""),
     "STORAGE_BACKEND": "s3", "S3_BUCKET": "$BUCKET", "S3_REGION": "$REGION",  # credentials: the server's IAM role
+    "S3_KMS_KEY_ID": "${S3_KMS_KEY_ID:-}",
     "MALWARE_SCAN": "clamav", "CLAMAV_HOST": "clamav",
     "SEARCH_BACKEND": "engine", "SEARCH_ENGINE_URL": "http://search:8080", "SEARCH_ENGINE_TOKEN": s["SEARCH_ENGINE_TOKEN"],
     "SEARCH_ENGINE_DIR": "$R/engine",

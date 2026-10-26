@@ -151,7 +151,9 @@ class S3Storage:
             config=Config(signature_version="s3v4"))
 
     def save(self, key: str, data: bytes):
-        self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ServerSideEncryption="AES256")
+        enc = ({"ServerSideEncryption": "aws:kms", "SSEKMSKeyId": settings.s3_kms_key_id, "BucketKeyEnabled": True}
+               if settings.s3_kms_key_id else {"ServerSideEncryption": "AES256"})
+        self.client.put_object(Bucket=self.bucket, Key=key, Body=data, **enc)
 
     def delete(self, key: str):
         self.client.delete_object(Bucket=self.bucket, Key=key)

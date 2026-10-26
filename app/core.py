@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
     s3_endpoint_url: str = ""
+    s3_kms_key_id: str = ""             # set = files encrypted with this KMS key (SSE-KMS); empty = SSE-S3 (AES256)
 
     smtp_host: str = ""
     smtp_port: int = 587
