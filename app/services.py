@@ -101,7 +101,7 @@ def row(o, exclude=()):
 
 
 def user_out(u: User):
-    return row(u, exclude=("password_hash",))
+    return row(u, exclude=("password_hash", "mfa_secret", "mfa_recovery", "mfa_last_step", "session_version"))
 
 
 # =============================================================== audit
@@ -378,7 +378,8 @@ def make_checklist(db: Session, org: Organization):
 
 
 def invite_link(user: User) -> str:
-    return _build_link("?invite=" + make_token(user.id, typ="invite", minutes=60 * 24 * 7))
+    # sv: the link stops working once used (accept_invite bumps session_version) or when a newer invite replaces it
+    return _build_link("?invite=" + make_token(user.id, typ="invite", minutes=60 * 24 * 7, sv=user.session_version or 0))
 
 
 def org_contact_emails(db: Session, org_id: int):

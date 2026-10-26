@@ -52,8 +52,11 @@ def test_full_onboarding_and_document_lifecycle(client, master, make_admin, db):
     # 3. Participant sets a password from the invite and signs in
     token = link.split("invite=")[1]
     r = client.post("/api/auth/accept-invite", json={"token": token, "password": "Partner!Pass123"})
-    assert r.status_code == 200
+    assert r.status_code == 200 and "token" not in r.json()  # the session is an HttpOnly cookie, not page data
+    assert client.get("/api/auth/me").json()["email"] == body["contact_email"]  # signed in by the cookie
+    r = client.post("/api/auth/login", json={"email": body["contact_email"], "password": "Partner!Pass123", "return_token": True})
     ph = {"Authorization": f"Bearer {r.json()['token']}"}
+    assert client.post("/api/auth/accept-invite", json={"token": token, "password": "Other!Pass1234"}).status_code == 404  # used once
     dash = client.get("/api/me/dashboard", headers=ph).json()
     assert dash["organization"]["stage"] == "joined" and len(dash["checklist"]) >= 4
 

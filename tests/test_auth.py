@@ -15,8 +15,8 @@ def test_health(client):
 def test_login_success_and_me(client, master):
     r = client.post("/api/auth/login", json={"email": master.email.upper(), "password": MASTER_PW})
     assert r.status_code == 200
-    assert "password_hash" not in r.json()["user"]
-    me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {r.json()['token']}"}).json()
+    assert "password_hash" not in r.json()["user"] and "token" not in r.json()
+    me = client.get("/api/auth/me").json()  # the HttpOnly session cookie signs the browser in
     assert me["role"] == "master_admin"
 
 

@@ -1,5 +1,5 @@
 /* Open Network for Carbon Markets (ONCM) Portal front end - vanilla JS SPA (Tailwind for styling). */
-const S = { token: localStorage.getItem('oncm_token'), user: null, cache: {} };
+const S = { user: null, cache: {} };  // the session is an HttpOnly cookie: page scripts never see it
 const $ = (s) => document.querySelector(s);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (d) => d ? new Date(d).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '-';
@@ -16,10 +16,10 @@ const BADGE = { draft: 'bg-neutral-100 text-neutral-600', submitted: 'bg-neutral
 const badge = (s) => `<span class="badge ${BADGE[s] || 'bg-neutral-200'}">${esc(label(s))}</span>`;
 
 async function api(path, { method = 'GET', body, form } = {}) {
-  const h = {}; if (S.token) h.Authorization = 'Bearer ' + S.token;
+  const h = { 'X-ONCM': '1' };  // required by the server for cookie-authenticated changes (CSRF protection)
   let payload; if (form) payload = form; else if (body) { h['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
   const r = await fetch('/api' + path, { method, headers: h, body: payload });
-  if (r.status === 401 && S.token) { logout(); throw new Error('Session expired'); }
+  if (r.status === 401 && S.user) { S.user = null; S.meta = null; boot(); throw new Error('Session expired. Please sign in again.'); }
   if (!r.ok) { let m = r.statusText; try { const j = await r.json(); m = typeof j.detail === 'string' ? j.detail : (j.detail || []).map(x => { const custom = String(x.msg).startsWith('Value error, '); const fld = (x.loc || []).slice(-1)[0]; const msg = String(x.msg).replace(/^Value error, /, ''); return (!custom && typeof fld === 'string' && fld !== 'body') ? label(fld) + ': ' + msg : msg; }).join('; ') || m; } catch {} throw new Error(m); }
   const ct = r.headers.get('content-type') || ''; return ct.includes('json') ? r.json() : r;
 }
@@ -45,7 +45,7 @@ const card = (inner, cls = '') => `<section class="bg-white rounded-xl border bo
 const empty = (t) => `<p class="text-sm text-neutral-600 py-6 text-center">${esc(t)}</p>`;
 
 /* ---------------- auth screens ---------------- */
-function logout() { localStorage.removeItem('oncm_token'); S.token = null; S.user = null; location.hash = ''; boot(); }
+async function logout() { try { await api('/auth/logout', { method: 'POST' }); } catch {} S.user = null; S.meta = null; location.hash = ''; boot(); }
 
 function authShell(inner) {
   return `<main class="min-h-screen grid lg:grid-cols-2 bg-white">
@@ -80,9 +80,48 @@ function loginView() {
   <p class="text-sm mt-4">New ONCM Consortium Partner Firm? <a href="#/join" class="underline font-semibold text-brand-600">Submit an Onboarding Request</a></p>`)}
   <p class="text-center text-sm mt-4"><a href="#/public" class="underline">Browse public resources</a></p>`);
   $('#f-login').onsubmit = run(async (e) => { e.preventDefault();
-    const r = await api('/auth/login', { method: 'POST', body: { email: $('#e').value, password: $('#p').value } }); setSession(r); });
+    const r = await api('/auth/login', { method: 'POST', body: { email: $('#e').value, password: $('#p').value } });
+    r.mfa_required ? mfaLoginView(r.mfa_token) : setSession(); });
 }
-function setSession(r) { S.meta = null; S.token = r.token; localStorage.setItem('oncm_token', r.token); history.replaceState(null, '', '/'); boot(); }
+function mfaLoginView(token) {
+  $('#app').innerHTML = authShell(card(`<h2 class="font-display text-2xl font-bold mb-1">Two-step verification</h2>
+  <p class="text-sm text-neutral-600">Enter the 6-digit code from your authenticator app. Lost your phone? Enter one of your recovery codes instead.</p>
+  <form id="f-mfa-login"><label class="l" for="mc">Code</label><input class="field font-mono tracking-widest" id="mc" required autocomplete="one-time-code" maxlength="20" autofocus>
+  <button class="btn btn-primary w-full justify-center mt-5">Verify</button></form>
+  <p class="text-sm mt-4"><a href="#" class="underline" id="mfa-back">Back to sign in</a></p>`));
+  $('#mfa-back').onclick = (e) => { e.preventDefault(); loginView(); };
+  $('#f-mfa-login').onsubmit = run(async (e) => { e.preventDefault();
+    await api('/auth/mfa', { method: 'POST', body: { mfa_token: token, code: $('#mc').value.trim() } }); setSession(); });
+}
+/* Two-step verification setup: QR code -> confirm a code -> show recovery codes once. */
+async function mfaSetup(target, done) {
+  const r = await api('/auth/mfa/setup', { method: 'POST' });
+  target.innerHTML = `<ol class="text-sm list-decimal pl-5 space-y-1"><li>Install an authenticator app (Microsoft Authenticator, Google Authenticator, 1Password, ...).</li>
+    <li>Scan this QR code with the app, or enter the key by hand.</li><li>Type the 6-digit code the app shows.</li></ol>
+    <div class="mt-3 w-52 h-52 bg-white border border-neutral-200 rounded-lg p-2" id="mfa-qr"></div>
+    <p class="text-xs mt-2">Key: <code class="font-mono break-all">${esc(r.secret.replace(/(.{4})/g, '$1 ').trim())}</code></p>
+    <form id="f-mfa-on" class="mt-3"><label class="l" for="mon">Code from the app</label><input class="field font-mono tracking-widest" id="mon" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+    <button class="btn btn-primary mt-3">Turn on two-step verification</button></form>`;
+  $('#mfa-qr').innerHTML = r.qr_svg.replace(/<\?xml[^>]*>/, '').replace('<svg ', '<svg width="100%" height="100%" ');
+  $('#f-mfa-on').onsubmit = run(async (e) => { e.preventDefault();
+    const x = await api('/auth/mfa/enable', { method: 'POST', body: { code: $('#mon').value.trim() } }); showRecoveryCodes(target, x.recovery_codes, done); });
+}
+function showRecoveryCodes(target, codes, done) {
+  target.innerHTML = `<p class="text-sm font-semibold">Two-step verification is on.</p><p class="text-sm mt-2">Save these recovery codes somewhere safe (a password manager, or printed). Each works once if you lose your phone. They are not shown again.</p>
+    <pre class="mt-3 p-3 bg-neutral-100 rounded-lg font-mono text-sm leading-7">${codes.map(esc).join('\n')}</pre>
+    <div class="flex gap-2 mt-3"><button class="btn btn-ghost" id="rc-dl">Download codes</button><button class="btn btn-primary" id="rc-ok">I have saved them</button></div>`;
+  $('#rc-dl').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([`ONCM Workbench recovery codes for ${S.user ? S.user.email : ''}\n\n${codes.join('\n')}\n`], { type: 'text/plain' }));
+    a.download = 'oncm-recovery-codes.txt'; a.click(); URL.revokeObjectURL(a.href); };
+  $('#rc-ok').onclick = done;
+}
+function mfaRequiredView() {
+  $('#app').innerHTML = authShell(card(`<h2 class="font-display text-2xl font-bold mb-1">Set up two-step verification</h2>
+  <p class="text-sm text-neutral-600 mb-3">Admin accounts must use a second step when signing in. This takes about a minute.</p><div id="mfa-box"></div>
+  <p class="text-sm mt-4"><a href="#" class="underline" id="mfa-out">Sign out</a></p>`));
+  $('#mfa-out').onclick = (e) => { e.preventDefault(); logout(); };
+  run(() => mfaSetup($('#mfa-box'), () => { S.user = null; boot(); }))();
+}
+function setSession() { S.meta = null; history.replaceState(null, '', '/'); boot(); }
 /* ---------------- Request to join: Organizational Profile and Scale ---------------- */
 const IN_STATES = ['Andaman and Nicobar Islands', 'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chandigarh', 'Chhattisgarh',
   'Dadra and Nagar Haveli and Daman and Diu', 'Delhi', 'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jammu and Kashmir', 'Jharkhand',
@@ -268,7 +307,7 @@ const NAV = {
     ['docs', 'Consortium Partner Documentation Status Dashboard'], ['workstreams', 'Workstream Status'],
     ['tasks', 'Workbench Task'], ['requests', 'Access requests', 'r'], ['changelog', 'Documentation Decision Status Log'],
     ['mail', 'Email monitor', 'x'], ['alerts', 'Admin alerts', 'm'], ['reports', 'Consortium Activity Tracking Report', 'e'],
-    ['admins', 'Admin accounts', 'm'], ['audit', 'Audit log', 'm']],
+    ['admins', 'Admin accounts', 'm'], ['audit', 'Audit log', 'm'], ['account', 'My account']],
 };
 const isAdmin = () => S.user.role !== 'participant';
 const VIEWS = {};
@@ -343,14 +382,21 @@ VIEWS.support = async () => shell('support', `${head('Support', 'Messages go to 
   <label class="l">Message</label><textarea class="field" name="message" rows="6" required minlength="5"></textarea>
   <button class="btn btn-primary mt-4">Send message</button></form>`)}`);
 VIEWS.account = async () => {
-  const u = S.user;
-  shell('account', `${head('Account')}<div class="grid md:grid-cols-2 gap-4">
-  ${card(`<h2 class="font-display font-bold text-lg">ONCM Consortium Partner Firm</h2><p class="mt-2 text-sm">${esc(u.organization?.name)} · ${esc(u.organization?.actor_type)}<br>${esc(u.name)} · ${esc(u.email)}</p>
+  const u = S.user = await api('/auth/me');  // fresh two-step verification status
+  const mfaCard = card(`<h2 class="font-display font-bold text-lg">Two-step verification</h2>
+  ${u.mfa_enabled ? `<p class="text-sm mt-2"><span class="badge bg-emerald-100 text-emerald-800">On</span> ${esc(u.mfa_recovery_codes_left)} recovery code(s) left.</p>
+    <div class="flex flex-wrap gap-2 mt-3"><button class="btn btn-ghost" data-act="mfa-codes">New recovery codes</button>${isAdmin() ? '' : '<button class="btn btn-danger" data-act="mfa-off">Turn off</button>'}</div>`
+  : `<p class="text-sm mt-2"><span class="badge bg-neutral-200 text-neutral-700">Off</span> Asks for a code from your phone when you sign in, so a stolen password alone is not enough.</p>
+    <button class="btn btn-primary mt-3" data-act="mfa-on">Set up</button>`}<div id="mfa-box" class="mt-4"></div>`);
+  shell('account', `${head(isAdmin() ? 'My account' : 'Account')}<div class="grid md:grid-cols-2 gap-4">
+  ${isAdmin() ? card(`<h2 class="font-display font-bold text-lg">${esc(u.name)}</h2><p class="mt-2 text-sm">${esc(u.email)} · ${esc(label(u.role))}</p>`) : card(`<h2 class="font-display font-bold text-lg">ONCM Consortium Partner Firm</h2><p class="mt-2 text-sm">${esc(u.organization?.name)} · ${esc(u.organization?.actor_type)}<br>${esc(u.name)} · ${esc(u.email)}</p>
   <h3 class="font-semibold mt-5 text-sm">Request a contact change</h3><form id="f-cc"><label class="l">New contact name</label><input class="field" name="contact_name" required>
   <label class="l">New contact email</label><input class="field" name="contact_email" type="email" required><label class="l">Reason</label><input class="field" name="reason" required>
   <button class="btn btn-ghost mt-3">Send for verification</button></form>`)}
   ${card(`<h2 class="font-display font-bold text-lg">Change password</h2><form id="f-pw"><label class="l">Current password</label><input class="field" name="current_password" type="password" required>
-  <label class="l">New password (10+ characters)</label><input class="field" name="new_password" type="password" minlength="10" required><button class="btn btn-primary mt-4">Update password</button></form>`)}</div>`);
+  <label class="l">New password (10+ characters)</label><input class="field" name="new_password" type="password" minlength="10" required><button class="btn btn-primary mt-4">Update password</button></form>
+  <p class="text-xs text-neutral-600 mt-2">Changing it signs you out everywhere else.</p>`)}
+  ${mfaCard}</div>`);
 };
 
 /* ---------------- admin views ---------------- */
@@ -452,9 +498,9 @@ VIEWS.reports = async () => {
 VIEWS.admins = async () => {
   const as = await api('/master/admins');
   shell('admins', `${head('Admin accounts', 'Every privilege change needs a reason and is audited.', `<button class="btn btn-primary" data-act="ad-new">New admin</button>`)}
-  ${card(`<table class="t"><thead><tr><th>Name</th><th>Role</th><th>Repository access</th><th>Can share</th><th>Can export</th><th>Active</th><th></th></tr></thead><tbody>${as.map(a => `<tr><td><b>${esc(a.name)}</b><div class="text-xs">${esc(a.email)}</div></td><td>${label(a.role)}</td>
+  ${card(`<table class="t"><thead><tr><th>Name</th><th>Role</th><th>Repository access</th><th>Can share</th><th>Can export</th><th>Active</th><th>2-step</th><th></th></tr></thead><tbody>${as.map(a => `<tr><td><b>${esc(a.name)}</b><div class="text-xs">${esc(a.email)}</div></td><td>${label(a.role)}</td>
   <td class="text-xs">${a.role === 'master_admin' ? 'All' : esc((a.repo_access || ['CM', 'POL', 'RES', 'PPD', 'CDP']).join(', '))}</td>
-  <td>${a.can_share ? 'Yes' : 'No'}</td><td>${a.can_export ? 'Yes' : 'No'}</td><td>${a.is_active ? 'Yes' : 'No'}</td><td class="text-right"><button class="btn btn-ghost" data-act="ad-edit" data-id="${a.id}">Edit</button></td></tr>`).join('')}</tbody></table>`)}`);
+  <td>${a.can_share ? 'Yes' : 'No'}</td><td>${a.can_export ? 'Yes' : 'No'}</td><td>${a.is_active ? 'Yes' : 'No'}</td><td>${a.mfa_enabled ? 'On' : 'Off'}</td><td class="text-right whitespace-nowrap">${a.mfa_enabled && a.id !== S.user.id ? `<button class="btn btn-ghost" data-act="ad-mfa" data-id="${a.id}">Reset 2-step</button>` : ''}<button class="btn btn-ghost" data-act="ad-edit" data-id="${a.id}">Edit</button></td></tr>`).join('')}</tbody></table>`)}`);
   S.cache.adminlist = as;
 };
 VIEWS.audit = async () => {
@@ -497,6 +543,11 @@ const getAll = (f, name) => [...f.querySelectorAll(`[name="${name}"]:checked`)].
 const catOpts = (extra = []) => opts([...CATS, ...extra]);
 const A = {
   close: closeModal, logout,
+  'mfa-on': run(async () => mfaSetup($('#mfa-box'), () => VIEWS.account())),
+  'mfa-codes': () => { $('#mfa-box').innerHTML = `<form id="f-mfa-codes"><label class="l">Current code from your app (old recovery codes stop working)</label><input class="field font-mono" name="code" inputmode="numeric" maxlength="6" required><button class="btn btn-primary mt-3">Create new codes</button></form>`; },
+  'mfa-off': () => { $('#mfa-box').innerHTML = `<form id="f-mfa-off"><label class="l">Password</label><input class="field" name="password" type="password" required><label class="l">Code from your app, or a recovery code</label><input class="field font-mono" name="code" maxlength="20" required><button class="btn btn-danger mt-3">Turn off two-step verification</button></form>`; },
+  'ad-mfa': run(async (d) => { const reason = prompt('Reset two-step verification for this person (lost phone and recovery codes)? Confirm who they are first, e.g. by phone. Reason:');
+    if (!reason) return; await api('/master/users/' + d.id + '/reset-mfa', { method: 'POST', body: { reason } }); toast('Two-step verification reset. They set it up again at next sign-in.'); VIEWS.admins(); }),
   pubdl: run(async (d) => download('/public/resources/' + d.id + '/download')),
   'p-dl': run(async (d) => download('/me/documents/' + d.id + '/download')),
   'r-dl': run(async (d) => download('/me/resources/' + d.id + '/download')),
@@ -664,6 +715,8 @@ document.addEventListener('click', (e) => { const el = e.target.closest('[data-a
 document.addEventListener('change', (e) => { const el = e.target.closest('[data-act]'); if (el && (el.tagName === 'SELECT' || el.type === 'checkbox')) A[el.dataset.act]?.(el.dataset, el); });
 const fd = (f) => Object.fromEntries([...new FormData(f)].map(([k, v]) => [k, v === '' ? null : v]));
 const FORMS = {
+  'f-mfa-codes': async (f) => { const r = await api('/auth/mfa/recovery-codes', { method: 'POST', body: fd(f) }); showRecoveryCodes($('#mfa-box'), r.recovery_codes, () => VIEWS.account()); },
+  'f-mfa-off': async (f) => { await api('/auth/mfa/disable', { method: 'POST', body: fd(f) }); toast('Two-step verification is off'); VIEWS.account(); },
   'f-pup': async (f) => { await api('/me/documents', { method: 'POST', form: new FormData(f) }); toast('Submitted for review'); closeModal(); go(); },
   'f-prep': async (f) => { await api(`/me/documents/${f.dataset.id}/versions`, { method: 'POST', form: new FormData(f) }); toast('New version submitted'); closeModal(); go(); },
   'f-q': async (f) => { const r = await api('/me/questions', { method: 'POST', body: fd(f) }); toast(r.message); f.reset(); },
@@ -720,7 +773,11 @@ window.addEventListener('hashchange', () => S.user ? go() : boot());
 async function boot() {
   const inv = new URLSearchParams(location.search).get('invite');
   if (inv) return inviteView(inv);
-  if (S.token) { try { S.user = await api('/auth/me'); if (isAdmin()) S.meta = await api('/admin/meta'); return go(); } catch { S.token = null; localStorage.removeItem('oncm_token'); } }
+  try { S.user = await api('/auth/me'); } catch { S.user = null; }
+  if (S.user) {
+    if (S.user.mfa_setup_required) return mfaRequiredView();
+    try { if (isAdmin()) S.meta = await api('/admin/meta'); return go(); } catch (e) { toast(e.message, true); }
+  }
   const h = location.hash; if (h === '#/join') return joinView(); if (h === '#/public') return publicView(); loginView();
 }
 boot();

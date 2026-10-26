@@ -12,5 +12,6 @@ boto3==1.35.90
 openpyxl==3.1.5
 alembic==1.20.0
 pypdf==6.21.1
+qrcode==8.1                     # two-step verification setup QR code
 pypdfium2==5.13.0               # OCR: renders scanned PDF pages
 pillow==12.3.0

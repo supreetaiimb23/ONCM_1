@@ -159,6 +159,26 @@ class OverrideIn(BaseModel):
     reason: str = Field(min_length=3)
 
 
+class ResetMfaIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/users/{uid}/reset-mfa")
+def reset_mfa(uid: int, body: ResetMfaIn, u: User = Depends(master_user), db: Session = Depends(get_db)):
+    """Someone lost their phone and recovery codes: turn two-step verification off for them and end their sessions.
+    Admins must set it up again at their next sign-in. Verify who is asking (e.g. by phone) before doing this."""
+    t = db.get(User, uid)
+    if not t:
+        raise HTTPException(404, "User not found")
+    if t.id == u.id:
+        raise HTTPException(409, "Ask another Master Admin to reset your own two-step verification")
+    t.mfa_enabled, t.mfa_secret, t.mfa_recovery, t.mfa_last_step = False, None, None, None
+    t.session_version = (t.session_version or 0) + 1
+    audit(db, u, "auth.mfa_reset", "user", t.id, {"email": t.email, "reason": body.reason})
+    db.commit()
+    return user_out(t)
+
+
 @router.post("/documents/{doc_id}/override")
 def override(doc_id: int, body: OverrideIn, u: User = Depends(master_user), db: Session = Depends(get_db)):
     """Exceptional case: force a document status. Reason is mandatory and audited."""

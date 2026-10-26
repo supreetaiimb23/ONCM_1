@@ -7,7 +7,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from app.core import SessionLocal, make_token
+from app.core import SessionLocal, make_token, session_token
 from app.models import Document, Organization, User
 
 ACC = json.load(open("/tmp/accounts.json"))
@@ -100,11 +100,11 @@ EICAR = rb"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 
 db = SessionLocal()
 master = db.query(User).filter_by(role="master_admin").order_by(User.id).first()
-M = make_token(master.id)
+M = session_token(master)
 admin2 = db.query(User).filter_by(email=ACC["admin2"]["email"]).one()
-A2 = make_token(admin2.id)
+A2 = session_token(admin2)
 pd_user = db.query(User).filter_by(email=ACC["pd"]["email"]).one()
-PD = make_token(pd_user.id)
+PD = session_token(pd_user)
 org = db.get(Organization, pd_user.organization_id)
 doc = db.query(Document).filter(Document.organization_id == org.id, Document.title.like("TEST - Project Design Document%")).one()
 

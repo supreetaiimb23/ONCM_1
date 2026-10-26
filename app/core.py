@@ -5,7 +5,7 @@ from pathlib import Path
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import create_engine
@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     two_person_rule: bool = True
     reminder_days: str = "3,0"
     access_token_minutes: int = 480
+    mfa_required_for_admins: bool = True  # admins must set up two-step verification before using admin pages
 
     master_admin_email: str = "admin@example.org"
     master_admin_password: str = "ChangeMe!12345"
@@ -178,25 +179,67 @@ from app.models import User  # noqa: E402
 bearer = HTTPBearer(auto_error=False)
 
 
-def current_user(cred: HTTPAuthorizationCredentials | None = Depends(bearer), db: Session = Depends(get_db)) -> User:
-    if not cred:
-        raise HTTPException(401, "Not authenticated")
-    p = decode_token(cred.credentials, "access")
+SESSION_COOKIE = "oncm_session"
+CSRF_HEADER = "x-oncm"  # browsers only let our own page's JavaScript set custom headers on cross-origin-safe requests
+
+
+def session_token(u: User) -> str:
+    return make_token(u.id, sv=u.session_version or 0)
+
+
+def set_session_cookie(response: Response, u: User):
+    """The browser session: HttpOnly (page scripts cannot read it), Secure on HTTPS, SameSite=Strict (not sent by
+    requests started on other sites), scoped to /api."""
+    response.set_cookie(SESSION_COOKIE, session_token(u), max_age=settings.access_token_minutes * 60, path="/api",
+                        httponly=True, secure=settings.app_base_url.startswith("https://"), samesite="strict")
+
+
+def clear_session_cookie(response: Response):
+    response.delete_cookie(SESSION_COOKIE, path="/api", httponly=True,
+                           secure=settings.app_base_url.startswith("https://"), samesite="strict")
+
+
+def current_user(request: Request, cred: HTTPAuthorizationCredentials | None = Depends(bearer),
+                 db: Session = Depends(get_db)) -> User:
+    """Bearer token (API clients, scripts) or the session cookie (the portal). Cookie-authenticated changes must
+    also carry the X-ONCM header: a form or script on another site cannot add it (CSRF)."""
+    if cred:
+        token = cred.credentials
+    else:
+        token = request.cookies.get(SESSION_COOKIE)
+        if not token:
+            raise HTTPException(401, "Not authenticated")
+        if request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get(CSRF_HEADER) != "1":
+            raise HTTPException(403, "Missing request header (CSRF protection)")
+    p = decode_token(token, "access")
     u = db.get(User, int(p["sub"]))
     if not u or not u.is_active:
         raise HTTPException(401, "Account inactive")
+    if p.get("sv", 0) != (u.session_version or 0):
+        raise HTTPException(401, "Session ended. Please sign in again.")
     return u
+
+
+def mfa_setup_required(u: User) -> bool:
+    return settings.mfa_required_for_admins and u.role != "participant" and not u.mfa_enabled
+
+
+def _require_mfa(u: User):
+    if mfa_setup_required(u):
+        raise HTTPException(403, "Two-step verification is required for admin accounts. Set it up under My account.")
 
 
 def admin_user(u: User = Depends(current_user)) -> User:
     if u.role not in ("master_admin", "secondary_admin"):
         raise HTTPException(403, "Admin access required")
+    _require_mfa(u)
     return u
 
 
 def master_user(u: User = Depends(current_user)) -> User:
     if u.role != "master_admin":
         raise HTTPException(403, "Master Admin access required")
+    _require_mfa(u)
     return u
 
 

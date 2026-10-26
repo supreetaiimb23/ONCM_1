@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import JSON, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import false as sa_false
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 
@@ -32,6 +33,12 @@ class User(Base):
     can_share = Column(Boolean, default=False)   # Secondary Admin: may authorise external sharing
     can_export = Column(Boolean, default=False)  # Secondary Admin: may export Excel reports
     repo_access = Column(JSON, nullable=True)    # admin: repository category codes they may open (None = defaults)
+    # two-step verification (TOTP); never sent to the browser (see user_out)
+    mfa_secret = Column(String(64))              # base32; set at setup, active once mfa_enabled
+    mfa_enabled = Column(Boolean, default=False, server_default=sa_false())
+    mfa_recovery = Column(JSON, nullable=True)   # bcrypt hashes of unused one-time recovery codes
+    mfa_last_step = Column(Integer)              # last accepted TOTP time step: a code cannot be used twice
+    session_version = Column(Integer, default=0, server_default="0")  # +1 = every existing session is signed out
     created_at = _ts()
 
 

@@ -3,7 +3,7 @@ import re
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from datetime import datetime, timezone
 
 from fastapi.responses import FileResponse, RedirectResponse
@@ -11,8 +11,9 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core import (current_user, decode_token, get_db, hash_password, make_token, rate_limit, settings,
-                      verify_password)
+from app import mfa
+from app.core import (clear_session_cookie, current_user, decode_token, get_db, hash_password, make_token, mfa_setup_required,
+                      rate_limit, session_token, set_session_cookie, settings, verify_password)
 from app import alerts
 from app.models import AccessRequest, Document, DocumentShare, JoinRequest, Organization, User
 from app.services import (ACTOR_TYPES, REPO_CATEGORIES, active_shares, audit, catalogue_docs, doc_code, doc_out, notify,
@@ -31,10 +32,20 @@ def health():
 class LoginIn(BaseModel):
     email: EmailStr
     password: str
+    return_token: bool = False   # API clients and scripts: also return the token (the portal relies on the cookie)
+
+
+def _session(response: Response, u: User, return_token: bool) -> dict:
+    """Start a session: HttpOnly cookie for the browser; the token itself only for API clients that ask for it."""
+    set_session_cookie(response, u)
+    out = {"user": user_out(u), "mfa_setup_required": mfa_setup_required(u)}
+    if return_token:
+        out["token"] = session_token(u)
+    return out
 
 
 @router.post("/auth/login")
-def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
+def login(body: LoginIn, request: Request, response: Response, db: Session = Depends(get_db)):
     rate_limit("login:" + (request.client.host if request.client else "?"), 10, 300)
     u = db.query(User).filter(func.lower(User.email) == body.email.lower()).first()
     if not u or not u.is_active or not verify_password(body.password, u.password_hash):
@@ -43,9 +54,56 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
         org = db.get(Organization, u.organization_id)
         if not org or org.status != "active":
             raise HTTPException(403, "This organization's access is suspended. Contact ONCM.")
+    if u.mfa_enabled:  # password was right; the session starts only after the second step
+        return {"mfa_required": True, "mfa_token": make_token(u.id, typ="mfa", minutes=5, sv=u.session_version or 0)}
     audit(db, u, "auth.login", "user", u.id)
     db.commit()
-    return {"token": make_token(u.id), "user": user_out(u)}
+    return _session(response, u, body.return_token)
+
+
+class MfaLoginIn(BaseModel):
+    mfa_token: str
+    code: str = Field(min_length=6, max_length=20)   # 6-digit authenticator code or a recovery code
+    return_token: bool = False
+
+
+def _check_second_factor(db, u: User, code: str) -> str | None:
+    """'totp' or 'recovery' when the code is valid (a recovery code is then used up), else None."""
+    step = mfa.verify(u.mfa_secret, code, u.mfa_last_step)
+    if step is not None:
+        u.mfa_last_step = step
+        return "totp"
+    normalized = code.strip().lower()
+    if normalized.isdigit():  # authenticator codes are digits; recovery codes always contain letters
+        return None
+    for i, h in enumerate(u.mfa_recovery or []):
+        if verify_password(normalized, h):
+            u.mfa_recovery = [x for j, x in enumerate(u.mfa_recovery) if j != i]
+            return "recovery"
+    return None
+
+
+@router.post("/auth/mfa")
+def login_second_step(body: MfaLoginIn, request: Request, response: Response, db: Session = Depends(get_db)):
+    p = decode_token(body.mfa_token, "mfa")
+    rate_limit("mfa:" + str(p["sub"]), 5, 300)  # 5 tries per 5 minutes: a 6-digit code cannot be guessed
+    u = db.get(User, int(p["sub"]))
+    if not u or not u.is_active or not u.mfa_enabled or p.get("sv", 0) != (u.session_version or 0):
+        raise HTTPException(401, "Sign-in expired. Please start again.")
+    used = _check_second_factor(db, u, body.code)
+    if not used:
+        audit(db, u, "auth.mfa_failed", "user", u.id)
+        db.commit()
+        raise HTTPException(401, "That code is not valid. Use the current code from your authenticator app, or a recovery code.")
+    audit(db, u, "auth.login", "user", u.id, {"second_factor": used, "recovery_codes_left": len(u.mfa_recovery or [])})
+    db.commit()
+    return _session(response, u, body.return_token)
+
+
+@router.post("/auth/logout")
+def logout(response: Response):
+    clear_session_cookie(response)
+    return {"ok": True}
 
 
 @router.get("/auth/me")
@@ -55,6 +113,8 @@ def me(u: User = Depends(current_user), db: Session = Depends(get_db)):
         o = db.get(Organization, u.organization_id)
         out["organization"] = {"id": o.id, "name": o.name, "actor_type": o.actor_type}
     out["two_person_rule"] = settings.two_person_rule
+    out["mfa_setup_required"] = mfa_setup_required(u)
+    out["mfa_recovery_codes_left"] = len(u.mfa_recovery or []) if u.mfa_enabled else None
     return out
 
 
@@ -64,13 +124,14 @@ class InviteIn(BaseModel):
 
 
 @router.post("/auth/accept-invite")
-def accept_invite(body: InviteIn, db: Session = Depends(get_db)):
+def accept_invite(body: InviteIn, response: Response, db: Session = Depends(get_db)):
     p = decode_token(body.token, "invite")
     u = db.get(User, int(p["sub"]))
-    if not u:
-        raise HTTPException(404, "Invitation not found")
+    if not u or p.get("sv", 0) != (u.session_version or 0):
+        raise HTTPException(404, "This invitation link was already used or has been replaced. Ask ONCM for a new one.")
     first_time = u.password_hash is None
     u.password_hash, u.is_active = hash_password(body.password), True
+    u.session_version = (u.session_version or 0) + 1  # the invite link (and any older session) stops working
     audit(db, u, "auth.invite_accepted", "user", u.id)
     if first_time and u.role == "participant" and u.organization_id:
         org = db.get(Organization, u.organization_id)
@@ -80,7 +141,7 @@ def accept_invite(body: InviteIn, db: Session = Depends(get_db)):
                                              [("Organisation", org.name), ("Actor type", org.actor_type), ("User", f"{u.name} <{u.email}>")]),
                                f"activated:{u.id}")
     db.commit()
-    return {"token": make_token(u.id), "user": user_out(u)}
+    return _session(response, u, False)
 
 
 class PwIn(BaseModel):
@@ -89,13 +150,84 @@ class PwIn(BaseModel):
 
 
 @router.post("/auth/change-password")
-def change_password(body: PwIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+def change_password(body: PwIn, response: Response, u: User = Depends(current_user), db: Session = Depends(get_db)):
     if not verify_password(body.current_password, u.password_hash):
         raise HTTPException(400, "Current password is incorrect")
     u.password_hash = hash_password(body.new_password)
+    u.session_version = (u.session_version or 0) + 1  # every other session (other browsers, stolen tokens) ends
     audit(db, u, "auth.password_changed", "user", u.id)
     db.commit()
+    set_session_cookie(response, u)  # this browser stays signed in
     return {"ok": True}
+
+
+@router.post("/auth/mfa/setup")
+def mfa_setup(u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Step 1: a new secret (not active yet) as a QR code for the authenticator app."""
+    if u.mfa_enabled:
+        raise HTTPException(409, "Two-step verification is already on")
+    u.mfa_secret, u.mfa_last_step = mfa.new_secret(), None
+    db.commit()
+    uri = mfa.otpauth_uri(u.mfa_secret, u.email)
+    return {"secret": u.mfa_secret, "otpauth_uri": uri, "qr_svg": mfa.qr_svg(uri)}
+
+
+class MfaCodeIn(BaseModel):
+    code: str = Field(min_length=6, max_length=20)
+
+
+@router.post("/auth/mfa/enable")
+def mfa_enable(body: MfaCodeIn, response: Response, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Step 2: prove the app works by entering its current code. Returns the recovery codes, once."""
+    rate_limit("mfa-enable:" + str(u.id), 10, 300)
+    if u.mfa_enabled:
+        raise HTTPException(409, "Two-step verification is already on")
+    step = mfa.verify(u.mfa_secret or "", body.code)
+    if step is None:
+        raise HTTPException(400, "That code is not valid. Check the time on your phone and try the newest code.")
+    codes = mfa.new_recovery_codes()
+    u.mfa_enabled, u.mfa_last_step, u.mfa_recovery = True, step, [hash_password(c) for c in codes]
+    u.session_version = (u.session_version or 0) + 1
+    audit(db, u, "auth.mfa_enabled", "user", u.id)
+    db.commit()
+    set_session_cookie(response, u)
+    return {"ok": True, "recovery_codes": codes}
+
+
+class MfaDisableIn(BaseModel):
+    password: str
+    code: str = Field(min_length=6, max_length=20)
+
+
+@router.post("/auth/mfa/disable")
+def mfa_disable(body: MfaDisableIn, response: Response, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    rate_limit("mfa-disable:" + str(u.id), 5, 300)
+    if u.role != "participant" and settings.mfa_required_for_admins:
+        raise HTTPException(409, "Two-step verification is required for admin accounts and cannot be turned off")
+    if not u.mfa_enabled:
+        raise HTTPException(409, "Two-step verification is not on")
+    if not verify_password(body.password, u.password_hash) or not _check_second_factor(db, u, body.code):
+        raise HTTPException(400, "Password or code is not correct")
+    u.mfa_enabled, u.mfa_secret, u.mfa_recovery, u.mfa_last_step = False, None, None, None
+    u.session_version = (u.session_version or 0) + 1
+    audit(db, u, "auth.mfa_disabled", "user", u.id)
+    db.commit()
+    set_session_cookie(response, u)
+    return {"ok": True}
+
+
+@router.post("/auth/mfa/recovery-codes")
+def mfa_new_recovery_codes(body: MfaCodeIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Replace all recovery codes (e.g. after using some). Needs a current authenticator code."""
+    rate_limit("mfa-codes:" + str(u.id), 5, 300)
+    step = mfa.verify(u.mfa_secret or "", body.code, u.mfa_last_step) if u.mfa_enabled else None
+    if step is None:
+        raise HTTPException(400, "That code is not valid")
+    codes = mfa.new_recovery_codes()
+    u.mfa_last_step, u.mfa_recovery = step, [hash_password(c) for c in codes]
+    audit(db, u, "auth.mfa_recovery_codes_replaced", "user", u.id)
+    db.commit()
+    return {"recovery_codes": codes}
 
 
 # ---- option lists for the "Organizational Profile and Scale" form (the UI reads them from /api/meta) ----

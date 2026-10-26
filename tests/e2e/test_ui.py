@@ -84,3 +84,44 @@ def test_no_content_security_policy_violations(page: Page, live_server, master):
         page.goto(live_server + "/" + route)
         page.wait_for_timeout(800)
     assert violations == []
+
+
+def _code_for(page: Page, ahead=0):
+    import time
+    from app import mfa
+    key = page.locator("code").first.inner_text().replace(" ", "")
+    return key, mfa._code(key, int(time.time() // mfa.STEP) + ahead)
+
+
+def test_admin_two_step_verification_end_to_end(page: Page, live_server, make_admin, monkeypatch):
+    """Required for admins: forced setup with QR + recovery codes, then sign-in asks for the code."""
+    import time
+    from app import mfa
+    from app.core import settings
+    monkeypatch.setattr(settings, "mfa_required_for_admins", True)
+    a = make_admin()
+    sign_in(page, live_server, a.email, "Admin!Pass123")
+    expect(page.get_by_role("heading", name="Set up two-step verification")).to_be_visible()
+    expect(page.locator("#mfa-qr svg")).to_be_visible()
+    key, code = _code_for(page)
+    page.locator("#mon").fill(code)
+    page.get_by_role("button", name="Turn on two-step verification").click()
+    expect(page.locator("pre")).to_contain_text("-")  # recovery codes shown once
+    assert len(page.locator("pre").inner_text().split()) == 10
+    page.get_by_role("button", name="I have saved them").click()
+    expect(page.get_by_role("heading", name="Overview")).to_be_visible()
+    # the session is not readable by page scripts
+    assert "oncm_session" not in page.evaluate("document.cookie")
+    assert page.evaluate("Object.keys(localStorage).filter(k => k.includes('token')).length") == 0
+
+    page.get_by_role("button", name="Sign out").click()
+    sign_in(page, live_server, a.email, "Admin!Pass123")
+    expect(page.get_by_role("heading", name="Two-step verification")).to_be_visible()
+    page.locator("#mc").fill("000000")
+    page.get_by_role("button", name="Verify").click()
+    expect(page.locator("#toast")).to_contain_text("not valid")
+    page.locator("#mc").fill(mfa._code(key, int(time.time() // mfa.STEP) + 1))
+    page.get_by_role("button", name="Verify").click()
+    expect(page.get_by_role("heading", name="Overview")).to_be_visible()
+    page.get_by_role("navigation", name="Main").get_by_role("link", name="My account").click()
+    expect(page.get_by_text("recovery code(s) left")).to_be_visible()

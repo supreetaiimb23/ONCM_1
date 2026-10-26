@@ -22,7 +22,7 @@ import zipfile
 from openpyxl import Workbook
 from PIL import Image, ImageDraw, ImageFont
 
-from app.core import SessionLocal, make_token
+from app.core import SessionLocal, make_token, session_token
 from app.models import JoinRequest, User
 
 BASE = "http://localhost:8000/api"
@@ -115,7 +115,7 @@ EICAR = rb"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 # ------------------------------------------------------------------ accounts
 db = SessionLocal()
 master = db.query(User).filter_by(role="master_admin").order_by(User.id).first()
-M = make_token(master.id)
+M = session_token(master)
 print(f"== Master Admin: {master.email}")
 
 st, r = call("POST", "/master/admins", M, {"name": "TEST Reviewer (Secondary Admin)", "email": ACC["admin2"]["email"],
@@ -124,7 +124,7 @@ st, r = call("POST", "/master/admins", M, {"name": "TEST Reviewer (Secondary Adm
                                             "repo_access": ["CM", "POL", "RES", "PPD", "CDP"]})
 check("create TEST secondary admin", st in (201, 409), r)
 admin2 = db.query(User).filter_by(email=ACC["admin2"]["email"]).one()
-A2 = make_token(admin2.id)
+A2 = session_token(admin2)
 
 print("== Onboarding decisions")
 jr = {j.contact_email: j for j in db.query(JoinRequest).filter(JoinRequest.contact_email.like("supreetpatil79+oncm%"))}
@@ -145,11 +145,11 @@ db.expire_all()
 tok = {}
 for key in ("pd", "vvb"):
     u = db.query(User).filter_by(email=ACC[key]["email"]).one()
-    st, r = call("POST", "/auth/accept-invite", json_body={"token": make_token(u.id, typ="invite"), "password": ACC[key]["password"]})
+    st, r = call("POST", "/auth/accept-invite", json_body={"token": make_token(u.id, typ="invite", sv=u.session_version or 0), "password": ACC[key]["password"]})
     check(f"{key} accepts invite and sets password", st == 200, r)
-    st, r = call("POST", "/auth/login", json_body={"email": ACC[key]["email"], "password": ACC[key]["password"]})
+    st, r = call("POST", "/auth/login", json_body={"email": ACC[key]["email"], "password": ACC[key]["password"], "return_token": True})
     check(f"{key} signs in with email + password", st == 200, r)
-    tok[key] = r["token"] if st == 200 else make_token(u.id)
+    tok[key] = r["token"] if st == 200 else session_token(u)
     ACC[key]["org_id"] = u.organization_id
 PD, VVB = tok["pd"], tok["vvb"]
 
