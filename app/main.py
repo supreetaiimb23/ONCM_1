@@ -1,4 +1,7 @@
+import base64
+import hashlib
 import logging
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -150,11 +153,34 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
 
 
+def _content_security_policy() -> str:
+    """Only our own origin may run scripts and receive data (connect-src 'self'), so even a compromised third-party
+    script (the Tailwind CDN) could not send tokens or documents elsewhere. The inline config script and the inline
+    `this.select()` handlers are allowed by hash, computed from the shipped files so edits stay covered."""
+    static = Path(__file__).resolve().parent.parent / "static"
+    sha = lambda t: "'sha256-" + base64.b64encode(hashlib.sha256(t.encode()).digest()).decode() + "'"  # noqa: E731
+    html = (static / "index.html").read_text()
+    inline_scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    handlers = set(re.findall(r'\bon[a-z]+="([^"]*)"', html + (static / "app.js").read_text()))
+    script_src = " ".join(["'self'", "https://cdn.tailwindcss.com", *map(sha, inline_scripts)]
+                          + (["'unsafe-hashes'", *map(sha, sorted(handlers))] if handlers else []))
+    return "; ".join([
+        "default-src 'self'", f"script-src {script_src}",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",  # Tailwind's CDN build injects <style> at runtime
+        "font-src 'self' https://fonts.gstatic.com", "img-src 'self' data:", "connect-src 'self'",
+        "object-src 'none'", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'"])
+
+
+CSP = _content_security_policy()
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     resp = await call_next(request)
     resp.headers.update({"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
-                         "Referrer-Policy": "same-origin", "Cache-Control": "no-store" if request.url.path.startswith("/api") else "no-cache"})
+                         "Referrer-Policy": "same-origin", "Cache-Control": "no-store" if request.url.path.startswith("/api") else "no-cache",
+                         "Content-Security-Policy": CSP, "Cross-Origin-Opener-Policy": "same-origin",
+                         "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()"})
     return resp
 
 

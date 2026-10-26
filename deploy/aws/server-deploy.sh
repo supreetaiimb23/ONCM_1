@@ -33,6 +33,39 @@ with open(sys.argv[1], "w") as f:
     f.writelines(f"{k}={v}\n" for k, v in env.items())
 PY
 
+install_refresh() {
+  # Monthly: rebuild on fresh base images and pull patched ClamAV/Caddy images, even when the code did not change.
+  printf 'REGION=%q\nBUCKET=%q\nSECRET_ID=%q\nDB_HOST=%q\nPUBLIC_IP=%q\nADMIN_EMAIL=%q\nSITE_ADDRESS=%q\nS3_KMS_KEY_ID=%q\n' \
+    "$REGION" "$BUCKET" "$SECRET_ID" "$DB_HOST" "$PUBLIC_IP" "${ADMIN_EMAIL:-}" "$SITE" "${S3_KMS_KEY_ID:-}" > /etc/oncm-deploy.env
+  cat > /usr/local/bin/oncm-refresh <<'SH'
+#!/bin/bash
+set -euo pipefail
+set -a; . /etc/oncm-deploy.env; set +a
+R=$(readlink -f /opt/oncm-current)
+exec bash "$R/oncm/deploy/aws/server-deploy.sh" "$R"
+SH
+  chmod 700 /usr/local/bin/oncm-refresh
+  cat > /etc/systemd/system/oncm-refresh.service <<'UNIT'
+[Unit]
+Description=Rebuild ONCM on patched base images
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/oncm-refresh
+UNIT
+  cat > /etc/systemd/system/oncm-refresh.timer <<'UNIT'
+[Unit]
+Description=Monthly ONCM image refresh (1st of the month, 03:00 IST)
+[Timer]
+OnCalendar=*-*-01 21:30:00 UTC
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now oncm-refresh.timer
+}
+
 install_backups() {
   # Nightly pg_dump to s3://bucket/backups/ (kept 30 days by the bucket lifecycle), on top of RDS automated backups.
   cat > /usr/local/bin/oncm-db-backup <<'SH'
@@ -70,11 +103,12 @@ UNIT
 }
 
 echo "== building images"
-docker build -q -t oncm-workbench:latest "$R/oncm"
-docker build -q -t adaptive-search:latest "$R/engine"
+docker build -q --pull -t oncm-workbench:latest "$R/oncm"   # --pull: latest patched base image
+docker build -q --pull -t adaptive-search:latest "$R/engine"
 
 echo "== starting"
 cd "$R/oncm"
+docker compose -p oncm -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile search pull -q clamav caddy
 docker compose -p oncm -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile search up -d --remove-orphans
 
 echo "== waiting for https://$SITE"
@@ -85,6 +119,7 @@ for _ in $(seq 1 60); do
     docker image prune -f >/dev/null
     docker compose -p oncm ps --format '{{.Service}}: {{.Status}}'
     install_backups
+    install_refresh
     echo "LIVE: https://$SITE"
     exit 0
   fi

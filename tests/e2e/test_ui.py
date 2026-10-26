@@ -72,3 +72,15 @@ def test_sign_out(page: Page, live_server, master):
     page.get_by_role("button", name="Sign out").click()
     expect(page.get_by_role("heading", name="Sign in")).to_be_visible()
     assert page.evaluate("localStorage.getItem('oncm_token')") is None
+
+
+def test_no_content_security_policy_violations(page: Page, live_server, master):
+    """The CSP must not block anything the portal itself uses (scripts, styles, fonts, images)."""
+    violations = []
+    page.on("console", lambda m: violations.append(m.text) if "Content Security Policy" in m.text else None)
+    sign_in(page, live_server, master.email, MASTER_PW)
+    page.wait_for_timeout(1500)
+    for route in ("#/join", "#/public"):
+        page.goto(live_server + "/" + route)
+        page.wait_for_timeout(800)
+    assert violations == []
