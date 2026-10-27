@@ -1,8 +1,8 @@
 """Admin endpoints shared by Master Admin and Secondary Admin (Secondary is scoped to assigned organizations)."""
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import func
@@ -15,7 +15,7 @@ from app.models import (AccessRequest, ChangeLog, ChecklistItem, Document, Docum
                         DocumentShare, DocumentVersion, Notification, Organization, Task, User, Workstream)
 from app.services import (ACCESS_LEVELS, ACTOR_TYPES, ALLOWED_LEVELS, CATEGORIES, DEFAULT_LEVEL, REPO_CATEGORIES,
                           STAGES, STAGE_GROUP, active_shares, add_version, admin_repo_codes, assign_serial, audit,
-                          can_see_doc, catalogue_docs, check_transition, close_review_tasks, doc_code, doc_out, doc_out_many,
+                          can_see_doc, check_transition, close_review_tasks, doc_code, doc_out, doc_out_many,
                           ensure_review_task, invite_link, latest_maker_id, lock_document, log_change, new_document, notify,
                           notify_doc_owners, read_validated, row, shared_mailbox, storage, utcnow, validate_classification,
                           version_row, visible_docs_clause)

@@ -15,7 +15,7 @@ from app import mfa, sso
 from app.core import (clear_session_cookie, current_user, decode_token, get_db, hash_password, make_token, mfa_setup_required,
                       rate_limit, session_token, set_session_cookie, settings, verify_password)
 from app import alerts
-from app.models import AccessRequest, Document, DocumentShare, JoinRequest, Organization, User
+from app.models import AccessRequest, Document, JoinRequest, Organization, User
 from app.services import (ACTOR_TYPES, REPO_CATEGORIES, active_shares, audit, catalogue_docs, doc_code, doc_out, notify,
                           shared_mailbox, storage, user_out)
 from app.models import DocumentVersion

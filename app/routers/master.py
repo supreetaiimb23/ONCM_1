@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app import alerts
 from app.core import get_db, hash_password, master_user
-from app.models import AuditLog, Document, JoinRequest, Organization, User
+from app.models import AuditLog, JoinRequest, Organization, User
 from app.services import (ADMIN_DEFAULT_REPO, REPO_CATEGORIES, audit, doc_out, invite_link, lock_document, make_checklist,
                           notify, row, TRANSITIONS, user_out)
 

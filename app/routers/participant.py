@@ -7,11 +7,10 @@ from sqlalchemy.orm import Session
 
 from app import search
 from app.core import get_db, participant_user
-from datetime import timedelta
 from app.models import (AccessRequest, ChecklistItem, Document, DocumentVersion, Notification, Organization, Task, User)
-from app.services import (ACCESS_LEVELS, CATEGORIES, FOLDER_TO_CODE, STAGES, active_shares, add_version, assign_serial,
+from app.services import (CATEGORIES, FOLDER_TO_CODE, STAGES, active_shares, add_version, assign_serial,
                           audit, catalogue_docs, check_transition, doc_code, doc_out, lock_document, new_document, notify,
-                          participant_resources, read_validated, shared_mailbox, storage, utcnow, version_row, row)
+                          participant_resources, read_validated, shared_mailbox, storage, version_row, row)
 
 router = APIRouter(prefix="/api/me")
 

@@ -8,8 +8,8 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import (AccessRequest, AuditLog, ChangeLog, ChecklistItem, Document, DocumentReview, DocumentVersion,
-                        Notification, Organization, Task, User, Workstream)
+from app.models import (AccessRequest, AuditLog, ChangeLog, ChecklistItem, Document, DocumentReview, Notification,
+                        Organization, Task, User, Workstream)
 from app.services import STAGE_GROUP, by_id, doc_code, latest_maker_ids, visible_docs_clause
 
 def _aw(x):

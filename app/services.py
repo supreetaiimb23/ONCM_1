@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app import alerts
 from app.core import SessionLocal, make_token, settings
 from datetime import timedelta
-from app.models import (AccessRequest, AuditLog, ChangeLog, ChecklistItem, Document, DocumentGrant, DocumentReview,
+from app.models import (AuditLog, ChangeLog, ChecklistItem, Document, DocumentGrant, DocumentReview,
                         DocumentShare, DocumentVersion, Notification, Organization, Task, User, Workstream)
 
 log = logging.getLogger("oncm")
@@ -381,10 +381,6 @@ def invite_link(user: User) -> str:
     # sv: the link stops working once used (accept_invite bumps session_version) or when a newer invite replaces it
     return _build_link("?invite=" + make_token(user.id, typ="invite", minutes=60 * 24 * 7, sv=user.session_version or 0))
 
-
-def org_contact_emails(db: Session, org_id: int):
-    org = db.get(Organization, org_id)
-    return [org.contact_email] if org and org.contact_email else []
 
 
 def _share_live(expires_at, now_) -> bool:

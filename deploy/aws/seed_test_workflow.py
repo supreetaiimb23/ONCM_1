@@ -9,7 +9,6 @@ Expects join requests created by the public form test (contact emails supreetpat
 """
 import io
 import json
-import os
 import random
 import sys
 import time

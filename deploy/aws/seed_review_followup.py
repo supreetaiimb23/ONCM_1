@@ -1,13 +1,12 @@
 """Follow-up to seed_test_workflow.py: assign the TEST secondary admin to TEST organisation #1 (approved earlier
 without an assigned admin) and run the participant-document review workflow on its Project Design Document."""
-import io
 import json
 import sys
 import urllib.error
 import urllib.request
 import uuid
 
-from app.core import SessionLocal, make_token, session_token
+from app.core import SessionLocal, session_token
 from app.models import Document, Organization, User
 
 ACC = json.load(open("/tmp/accounts.json"))
@@ -68,34 +67,7 @@ def pdf(text, size=0):
     return bytes(out)
 
 
-def scan(text, fmt="PDF"):
-    img = Image.new("RGB", (1700, 500), "white")
-    d = ImageDraw.Draw(img)
-    for i, line in enumerate(text.split("|")):
-        d.text((80, 100 + i * 110), line.strip(), fill="black", font=ImageFont.load_default(size=56))
-    buf = io.BytesIO()
-    img.save(buf, fmt, resolution=200) if fmt == "PDF" else img.save(buf, fmt, quality=92)
-    return buf.getvalue()
-
-
-def docx(text):
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("word/document.xml", f"<w:document><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>")
-    return buf.getvalue()
-
-
-def xlsx(rows):
-    wb = Workbook()
-    for r in rows:
-        wb.active.append(r)
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
-
 MB = 1024 * 1024
-EICAR = rb"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 
 
 db = SessionLocal()
