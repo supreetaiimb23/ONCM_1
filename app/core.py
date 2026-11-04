@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     two_person_rule: bool = True
     reminder_days: str = "3,0"
     access_token_minutes: int = 480
+    two_step_verification: bool = False   # authenticator-app second step; off: password sign-in only (MFA settings below ignored)
     mfa_required_for_admins: bool = True  # admins must set up two-step verification before using admin pages
 
     # ---- Sign in with Microsoft (Entra ID, OpenID Connect). Off until all three are set. ----
@@ -232,7 +233,7 @@ def current_user(request: Request, cred: HTTPAuthorizationCredentials | None = D
 
 def mfa_setup_required(u: User) -> bool:
     ext_mfa = bool(getattr(u, "session_claims", {}).get("xmfa"))  # Microsoft sign-in with enforced MFA
-    return settings.mfa_required_for_admins and u.role != "participant" and not u.mfa_enabled and not ext_mfa
+    return settings.two_step_verification and settings.mfa_required_for_admins and u.role != "participant" and not u.mfa_enabled and not ext_mfa
 
 
 def _require_mfa(u: User):

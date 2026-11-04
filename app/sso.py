@@ -149,7 +149,7 @@ def callback(request: Request, db: Session = Depends(get_db), code: str = "", st
 
     r = RedirectResponse("/", status_code=302)
     r.delete_cookie(STATE_COOKIE, path="/api/auth/sso")
-    if u.mfa_enabled and not ext_mfa:  # ONCM's own second step
+    if settings.two_step_verification and u.mfa_enabled and not ext_mfa:  # ONCM's own second step
         audit(db, u, "auth.sso_password_step", "user", u.id, {"provider": "microsoft"})
         db.commit()
         r.headers["location"] = "/?sso=mfa"

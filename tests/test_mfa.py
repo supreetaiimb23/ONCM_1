@@ -187,3 +187,16 @@ def test_invite_link_works_once(client, make_org, db):
     assert client.post("/api/auth/accept-invite", json={"token": token, "password": "First!Pass1234"}).status_code == 200
     assert client.post("/api/auth/accept-invite", json={"token": token, "password": "Hijack!Pass1234"}).status_code == 404
     assert make_token(p.id) and login(client, p.email, "First!Pass1234").status_code == 200
+
+
+def test_switched_off_means_password_only(client, make_admin, monkeypatch):
+    a = make_admin()
+    enable_mfa(client, a)
+    monkeypatch.setattr(settings, "two_step_verification", False)
+    monkeypatch.setattr(settings, "mfa_required_for_admins", True)
+    r = login(client, a.email, PW)
+    assert r.status_code == 200 and "mfa_required" not in r.json()
+    assert r.json()["mfa_setup_required"] is False
+    me = client.get("/api/auth/me").json()
+    assert me["two_step_verification"] is False and me["mfa_setup_required"] is False
+    assert client.get("/api/admin/meta").status_code == 200
