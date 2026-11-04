@@ -399,7 +399,7 @@ VIEWS.account = async () => {
   ${card(`<h2 class="font-display font-bold text-lg">Change password</h2><form id="f-pw"><label class="l">Current password</label><input class="field" name="current_password" type="password" required>
   <label class="l">New password (10+ characters)</label><input class="field" name="new_password" type="password" minlength="10" required><button class="btn btn-primary mt-4">Update password</button></form>
   <p class="text-xs text-neutral-600 mt-2">Changing it signs you out everywhere else.</p>`)}
-  ${mfaCard}</div>`);
+  ${u.two_step_verification ? mfaCard : ''}</div>`);
 };
 
 /* ---------------- admin views ---------------- */

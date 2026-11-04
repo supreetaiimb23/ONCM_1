@@ -57,7 +57,7 @@ def login(body: LoginIn, request: Request, response: Response, db: Session = Dep
         org = db.get(Organization, u.organization_id)
         if not org or org.status != "active":
             raise HTTPException(403, "This organization's access is suspended. Contact ONCM.")
-    if u.mfa_enabled:  # password was right; the session starts only after the second step
+    if settings.two_step_verification and u.mfa_enabled:  # password was right; the session starts only after the second step
         return {"mfa_required": True, "mfa_token": make_token(u.id, typ="mfa", minutes=5, sv=u.session_version or 0)}
     audit(db, u, "auth.login", "user", u.id)
     db.commit()
@@ -117,6 +117,7 @@ def me(u: User = Depends(current_user), db: Session = Depends(get_db)):
         o = db.get(Organization, u.organization_id)
         out["organization"] = {"id": o.id, "name": o.name, "actor_type": o.actor_type}
     out["two_person_rule"] = settings.two_person_rule
+    out["two_step_verification"] = settings.two_step_verification
     out["mfa_setup_required"] = mfa_setup_required(u)
     out["mfa_recovery_codes_left"] = len(u.mfa_recovery or []) if u.mfa_enabled else None
     return out

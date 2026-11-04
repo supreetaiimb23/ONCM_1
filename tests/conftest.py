@@ -33,7 +33,7 @@ os.environ.update({
     "TWO_PERSON_RULE": "true",
     "MAX_UPLOAD_MB": "25",
     "SMTP_HOST": "", "ALERT_SMTP_HOST": "", "ALERT_SMTP_USER": "", "ALERT_SMTP_PASSWORD": "",
-    "ALERT_RECIPIENTS": "", "IMAP_HOST": "", "MALWARE_SCAN": "off", "SEARCH_BACKEND": "db", "APP_ENV": "production", "MFA_REQUIRED_FOR_ADMINS": "false",
+    "ALERT_RECIPIENTS": "", "IMAP_HOST": "", "MALWARE_SCAN": "off", "SEARCH_BACKEND": "db", "APP_ENV": "production", "MFA_REQUIRED_FOR_ADMINS": "false", "TWO_STEP_VERIFICATION": "true",
 })
 
 from fastapi.testclient import TestClient  # noqa: E402
