@@ -64,13 +64,14 @@ def my_documents(u: User = Depends(participant_user), db: Session = Depends(get_
 
 
 @router.post("/documents", status_code=201)
-def upload(category: str = Form(...), title: str = Form(...), doc_type: str = Form(""), checklist_item_id: Optional[int] = Form(None),
+def upload(category: str = Form(...), title: str = Form(...), doc_type: str = Form(""), checklist_item_id: str = Form(""),
            file: UploadFile = File(...), u: User = Depends(participant_user), db: Session = Depends(get_db)):
     o = _org(db, u)
     if category not in CATEGORIES:
         raise HTTPException(400, "Unknown category")
-    item = db.get(ChecklistItem, checklist_item_id) if checklist_item_id else None
-    if checklist_item_id and (not item or item.organization_id != o.id):
+    item_id = int(checklist_item_id) if checklist_item_id.strip().isdigit() else None  # "" = not for a checklist item
+    item = db.get(ChecklistItem, item_id) if item_id else None
+    if checklist_item_id.strip() and (not item or item.organization_id != o.id):
         raise HTTPException(400, "Unknown checklist item")
     upload_ = read_validated(file)
     d = new_document(db, FOLDER_TO_CODE[category], organization_id=o.id, category=category, title=title.strip()[:250],
