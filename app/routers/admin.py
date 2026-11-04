@@ -275,7 +275,23 @@ def add_member(org_id: int, body: MemberIn, u: User = Depends(admin_user), db: S
 def members(org_id: int, u: User = Depends(admin_user), db: Session = Depends(get_db)):
     o = get_org(db, u, org_id)
     return [{"id": m.id, "name": m.name, "email": m.email, "active": m.is_active, "pending_invite": m.password_hash is None}
-            for m in db.query(User).filter_by(organization_id=o.id)]
+            for m in db.query(User).filter_by(organization_id=o.id).order_by(User.id)]
+
+
+@router.post("/users/{uid}/password-link")
+def password_link(uid: int, u: User = Depends(admin_user), db: Session = Depends(get_db)):
+    """One-time link to set a password (first sign-in or forgotten password), for an admin to pass on while email is
+    not set up. Admins may do this for people in organisations they can see; only the Master Admin for other admins."""
+    t = db.get(User, uid)
+    if not t or not t.is_active:
+        raise HTTPException(404, "User not found")
+    if t.role == "participant":
+        get_org(db, u, t.organization_id)
+    elif u.role != MASTER or t.id == u.id:
+        raise HTTPException(403, "Only the Master Admin can do this for another admin")
+    audit(db, u, "auth.password_link_created", "user", t.id, {"email": t.email})
+    db.commit()
+    return {"link": invite_link(t), "email": t.email, "valid_days": 7}
 
 
 # ---------------------------------------------------------------- repository documents
@@ -499,6 +515,10 @@ def review(doc_id: int, body: ReviewIn, u: User = Depends(admin_user), db: Sessi
                           f"{dec}:{utcnow():%Y%m%d%H%M%S}", team=dec in ("approve", "recommend"))
     if dec == "approve":
         log_change(db, u, f"Approved {code}", f"Access level confirmed: {ACCESS_LEVELS[d.access_level]}", d)
+        item = db.get(ChecklistItem, d.checklist_item_id) if d.checklist_item_id else None
+        if item and item.organization_id == d.organization_id and not item.done:  # the upload was for this item
+            item.done, item.completed_by, item.completed_at = True, u.id, utcnow()
+            audit(db, u, "checklist.completed_by_approval", "checklist", item.id, {"document": d.id, "title": item.title})
     audit(db, u, f"document.{dec}", "document", d.id, {"version": d.current_version, "code": code})
     db.commit()
     return doc_out(db, d)

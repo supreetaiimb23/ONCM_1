@@ -651,7 +651,8 @@ def doc_out_many(db: Session, docs, for_participant=False):
                "repo_category_name": REPO_CATEGORIES.get(d.repo_category), "doc_type": d.doc_type, "status": d.status,
                "stage": STAGE_GROUP.get(d.status), "current_version": d.current_version, "organization_id": d.organization_id,
                "organization_name": org.name if org else "ONCM repository", "origin": d.origin,
-               "due_date": iso(d.due_date), "updated_at": iso(d.updated_at), "created_at": iso(d.created_at)}
+               "due_date": iso(d.due_date), "updated_at": iso(d.updated_at), "created_at": iso(d.created_at),
+               "checklist_item_id": d.checklist_item_id}
         if for_participant:
             out["feedback"] = fb.get(d.id)
         else:

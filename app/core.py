@@ -237,6 +237,8 @@ def mfa_setup_required(u: User) -> bool:
 
 
 def _require_mfa(u: User):
+    if u.must_change_password:
+        raise HTTPException(403, "Change your temporary password under My account first.")
     if mfa_setup_required(u):
         raise HTTPException(403, "Two-step verification is required for admin accounts. Set it up under My account.")
 
@@ -258,4 +260,5 @@ def master_user(u: User = Depends(current_user)) -> User:
 def participant_user(u: User = Depends(current_user)) -> User:
     if u.role != "participant" or not u.organization_id:
         raise HTTPException(403, "Participant access required")
+    _require_mfa(u)
     return u

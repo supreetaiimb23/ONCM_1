@@ -16,8 +16,8 @@ from app.core import (clear_session_cookie, current_user, decode_token, get_db, 
                       rate_limit, session_token, set_session_cookie, settings, verify_password)
 from app import alerts
 from app.models import AccessRequest, Document, JoinRequest, Organization, User
-from app.services import (ACTOR_TYPES, REPO_CATEGORIES, active_shares, audit, catalogue_docs, doc_code, doc_out, notify,
-                          shared_mailbox, storage, user_out)
+from app.services import (ACTOR_TYPES, REPO_CATEGORIES, active_shares, audit, catalogue_docs, doc_code, doc_out, invite_link,
+                          notify, shared_mailbox, storage, user_out, utcnow)
 from app.models import DocumentVersion
 
 router = APIRouter(prefix="/api")
@@ -118,6 +118,7 @@ def me(u: User = Depends(current_user), db: Session = Depends(get_db)):
         out["organization"] = {"id": o.id, "name": o.name, "actor_type": o.actor_type}
     out["two_person_rule"] = settings.two_person_rule
     out["two_step_verification"] = settings.two_step_verification
+    out["upload_limits"] = {"max_mb": settings.max_upload_mb, "extensions": settings.allowed_extensions.split(",")}
     out["mfa_setup_required"] = mfa_setup_required(u)
     out["mfa_recovery_codes_left"] = len(u.mfa_recovery or []) if u.mfa_enabled else None
     return out
@@ -135,7 +136,7 @@ def accept_invite(body: InviteIn, response: Response, db: Session = Depends(get_
     if not u or p.get("sv", 0) != (u.session_version or 0):
         raise HTTPException(404, "This invitation link was already used or has been replaced. Ask ONCM for a new one.")
     first_time = u.password_hash is None
-    u.password_hash, u.is_active = hash_password(body.password), True
+    u.password_hash, u.is_active, u.must_change_password = hash_password(body.password), True, False
     u.session_version = (u.session_version or 0) + 1  # the invite link (and any older session) stops working
     audit(db, u, "auth.invite_accepted", "user", u.id)
     if first_time and u.role == "participant" and u.organization_id:
@@ -149,6 +150,25 @@ def accept_invite(body: InviteIn, response: Response, db: Session = Depends(get_
     return _session(response, u, False)
 
 
+class ForgotIn(BaseModel):
+    email: EmailStr
+
+
+@router.post("/auth/forgot-password")
+def forgot_password(body: ForgotIn, request: Request, db: Session = Depends(get_db)):
+    """Email a one-time link to set a new password. Same answer whether or not the account exists."""
+    rate_limit("forgot:" + (request.client.host if request.client else "?"), 5, 900)
+    u = db.query(User).filter(func.lower(User.email) == body.email.lower()).first()
+    if u and u.is_active and u.password_hash and not sso.password_sign_in_blocked(u.email):
+        notify(db, "password_reset", u.email, "Reset your ONCM password",
+               f"Someone asked to reset the password for this account. Set a new one with this link (valid 7 days, works once):\n"
+               f"{invite_link(u)}\n\nIf it wasn't you, ignore this email: your password stays the same.",
+               f"pw-reset:{u.id}:{utcnow():%Y%m%d%H%M}")
+        audit(db, u, "auth.password_reset_requested", "user", u.id)
+        db.commit()
+    return {"message": "If that email has an account, a link to set a new password is on its way. Ask ONCM if it doesn't arrive."}
+
+
 class PwIn(BaseModel):
     current_password: str
     new_password: str = Field(min_length=10, max_length=128)
@@ -158,7 +178,9 @@ class PwIn(BaseModel):
 def change_password(body: PwIn, response: Response, u: User = Depends(current_user), db: Session = Depends(get_db)):
     if not verify_password(body.current_password, u.password_hash):
         raise HTTPException(400, "Current password is incorrect")
-    u.password_hash = hash_password(body.new_password)
+    if body.new_password == body.current_password:
+        raise HTTPException(400, "Choose a new password that is different from the current one")
+    u.password_hash, u.must_change_password = hash_password(body.new_password), False
     u.session_version = (u.session_version or 0) + 1  # every other session (other browsers, stolen tokens) ends
     audit(db, u, "auth.password_changed", "user", u.id)
     db.commit()
