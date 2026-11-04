@@ -31,6 +31,14 @@ def _master(db):
     return db.query(User).filter_by(role="master_admin").first()
 
 
+def test_upload_not_for_a_checklist_item(client, make_org):
+    _, p = make_org()
+    r = client.post("/api/me/documents", headers=auth(p), files=pdf_file(),
+                    data={"title": "Extra evidence", "category": "01 Onboarding documents", "checklist_item_id": ""})
+    assert r.status_code == 201, r.text
+    assert r.json()["checklist_item_id"] is None
+
+
 def test_upload_cannot_use_another_organisations_checklist_item(client, db, make_org):
     o1, p1 = make_org()
     o2, _ = make_org()

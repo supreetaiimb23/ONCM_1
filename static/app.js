@@ -77,7 +77,8 @@ async function sendUpload(f, path, doneMsg) {
     $('#up-pct').textContent = p >= 1 ? 'Saving and checking the file…' : `Uploading ${Math.round(p * 100)}% of ${mb(file.size)}${left !== null && left > 3 ? ` · about ${Math.ceil(left)} s left` : ''}`;
     btn.textContent = p >= 1 ? 'Finishing…' : `Uploading ${Math.round(p * 100)}%`; };
   show(0);
-  try { await uploadForm(path, new FormData(f), show); }
+  const form = new FormData(f); if (form.get('checklist_item_id') === '') form.delete('checklist_item_id');
+  try { await uploadForm(path, form, show); }
   catch (e) { $('#up-prog').classList.add('hidden'); throw e; }
   finally { btn.disabled = false; btn.textContent = label0; window.onbeforeunload = null; S.uploading = false; }
   toast(doneMsg); closeModal(); go();
