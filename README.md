@@ -6,12 +6,15 @@ decision and download audited.
 
 ## Features
 
-- Onboarding: public application form, approval workflow, per-organisation workspace and checklist
+- Onboarding: public application form, approval workflow, per-organisation workspace and checklist; uploads are
+  linked to checklist items and tick them on approval
 - Versioned documents with stable codes (`ONCM-POL-2026-V1-0003`), maker-checker review and two-person approval
 - Six access levels, organisation isolation, request-only resources, short-lived signed downloads
 - Search by title and code; optional full-text, OCR and semantic search via
   [adaptive-search-engine](https://github.com/supreetpatil79/adaptive-search-engine)
-- ClamAV scanning, TOTP two-step verification, Microsoft Entra ID sign-in, encrypted storage
+- Uploads with progress and size/type checks before sending; reviewer feedback shown on resubmission
+- ClamAV scanning, optional TOTP two-step verification, Microsoft Entra ID sign-in, encrypted storage
+- Self-service password reset, one-time sign-in links for admins to hand out, forced change of temporary passwords
 - Excel reporting, email notifications and reminders, admin alerts
 
 ## Architecture
@@ -64,7 +67,7 @@ Everything lives in `.env`; [.env.example](.env.example) documents every setting
 | Scan uploads for viruses | `MALWARE_SCAN=clamav` (the `clamav` service); uploads are refused while the scanner is down |
 | Send email | `SMTP_*`, `MAIL_FROM` (e.g. Amazon SES); empty = emails recorded as `logged` in the Email monitor |
 | Alert admins about activity | `ALERT_SMTP_*`, `ALERT_RECIPIENTS` — see [ADMIN_ALERTS.md](ADMIN_ALERTS.md) |
-| Require two-step verification for admins | `MFA_REQUIRED_FOR_ADMINS=true` (default) |
+| Turn on two-step verification | `TWO_STEP_VERIFICATION=true` (default `false`: password sign-in only); `MFA_REQUIRED_FOR_ADMINS=true` then makes it mandatory for admins |
 | Sign in with Microsoft | `SSO_MICROSOFT_*` — set-up steps in [deploy/aws/README.md](deploy/aws/README.md#sign-in-with-microsoft-entra-id) |
 | Search inside files | `SEARCH_BACKEND=engine`, `SEARCH_ENGINE_URL`, `SEARCH_ENGINE_TOKEN`; `OCR_*` for scanned files |
 | Two-person rule | `TWO_PERSON_RULE=true`: Secondary Admins recommend, the Master Admin or designated approver approves |
@@ -74,9 +77,13 @@ Everything lives in `.env`; [.env.example](.env.example) documents every setting
 
 - **Sign-in**: bcrypt passwords; session in an `HttpOnly; Secure; SameSite=Strict` cookie; cookie-authenticated changes
   require the `X-ONCM` header (CSRF); login and second-step rate limits.
-- **Two-step verification**: TOTP with QR set-up and 10 one-time recovery codes; required for admins, optional for
-  participants; a Master Admin can reset it for someone who lost their phone (audited).
-- **Sessions end** on password or MFA change (`session_version`); invite links work once.
+- **Two-step verification** (`TWO_STEP_VERIFICATION`, off by default): TOTP with QR set-up and 10 one-time recovery
+  codes; required for admins when on, optional for participants; a Master Admin can reset it (audited). Turning it
+  off keeps existing enrolments, so turning it back on restores them.
+- **Passwords**: set through one-time links (invite, forgotten password, or a link an admin creates while email is not
+  configured), valid 7 days; admins created with a temporary password must change it before using any page.
+  `/auth/forgot-password` answers the same whether or not the account exists.
+- **Sessions end** on password or MFA change (`session_version`); password links work once.
 - **Authorisation** is enforced on the server for every request: roles, organisation isolation, document visibility,
   maker-checker, two-person rule, status transitions.
 - **Files**: type, size (≤ 25 MB) and content checks, ClamAV scan, private bucket, SSE-KMS, signed short-lived links.
@@ -111,7 +118,7 @@ broader than what was approved. The person who prepared a version can never revi
 |---|---|
 | **Master Admin** | Everything: onboarding decisions, admins and permissions, final approval, publication, overrides (audited), audit log |
 | **Secondary Admin** | Assigned organisations and granted categories: upload, review, recommend; publish / approve access requests only with `can_share`; reports with `can_export` |
-| **Participant** | Own organisation only: upload into four folders, replace documents when changes are requested, resources published to them, request access, questions |
+| **Participant** | Own organisation only: upload against checklist items into four folders, replace documents when changes are requested, resources published to them, request access, questions |
 
 ## API
 
@@ -121,9 +128,9 @@ API clients may send `Authorization: Bearer <token>` (request one with `"return_
 | Area | Endpoints |
 |---|---|
 | Public | `GET /health` · `GET /meta` · `POST /join-requests` · `GET /public/resources` · `POST /public/access-requests` |
-| Sign-in | `POST /auth/login` · `POST /auth/mfa` · `POST /auth/logout` · `GET /auth/me` · `POST /auth/change-password` · `POST /auth/accept-invite` · `POST /auth/mfa/setup\|enable\|disable\|recovery-codes` · `GET /auth/sso/microsoft/start` |
+| Sign-in | `POST /auth/login` · `POST /auth/mfa` · `POST /auth/logout` · `GET /auth/me` · `POST /auth/change-password` · `POST /auth/forgot-password` · `POST /auth/accept-invite` · `POST /auth/mfa/setup\|enable\|disable\|recovery-codes` · `GET /auth/sso/microsoft/start` |
 | Participant | `/me/dashboard` · `/me/documents` · `/me/resources?q=` · `/me/catalogue?q=` · `/me/access-requests` · `/me/questions` |
-| Admin | `/admin/overview` · `/admin/organizations` · `/admin/documents?q=` (+ versions, assign, review, publish, grants, archive) · `/admin/access-requests` · `/admin/workstreams` · `/admin/tasks` · `/admin/changelog` · `/admin/notifications` · `/admin/reports/export` |
+| Admin | `/admin/overview` · `/admin/organizations` (+ members) · `/admin/users/{id}/password-link` · `/admin/documents?q=` (+ versions, assign, review, publish, grants, archive) · `/admin/access-requests` · `/admin/workstreams` · `/admin/tasks` · `/admin/changelog` · `/admin/notifications` · `/admin/reports/export` |
 | Master | `/master/join-requests` · `/master/admins` · `/master/users/{id}/reset-mfa` · `/master/audit-logs` · `/master/documents/{id}/override` · alert settings |
 
 ## Database migrations
@@ -144,7 +151,8 @@ TEST_DATABASE_URL=postgresql://localhost/oncm_test pytest    # same suite on Pos
 playwright install chromium && pytest -m e2e                 # browser tests
 ```
 
-CI runs the suite on every push and pull request (`.github/workflows/tests.yml`).
+CI runs both suites, including the browser tests, on every push and pull request (`.github/workflows/tests.yml`);
+run `pytest -m e2e` locally before pushing UI changes.
 
 ## Deployment
 
