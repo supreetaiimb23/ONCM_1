@@ -109,7 +109,7 @@ def create_admin(body: AdminIn, u: User = Depends(master_user), db: Session = De
         raise HTTPException(409, "Email already registered")
     if body.role == "master_admin" and len(body.reason.strip()) < 3:
         raise HTTPException(400, "A reason is required to create another Master Admin")
-    a = User(name=body.name, email=body.email.lower(), role=body.role, password_hash=hash_password(body.password),
+    a = User(name=body.name, email=body.email.lower(), role=body.role, password_hash=hash_password(body.password), must_change_password=True,
              can_share=body.can_share, can_export=body.can_export,
              repo_access=[c for c in (body.repo_access if body.repo_access is not None else ADMIN_DEFAULT_REPO) if c in REPO_CATEGORIES])
     db.add(a)

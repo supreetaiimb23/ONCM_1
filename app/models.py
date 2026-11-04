@@ -40,6 +40,7 @@ class User(Base):
     mfa_last_step = Column(Integer)              # last accepted TOTP time step: a code cannot be used twice
     session_version = Column(Integer, default=0, server_default="0")  # +1 = every existing session is signed out
     sso_oid = Column(String(64), index=True)     # Microsoft Entra object ID, bound at the first Microsoft sign-in
+    must_change_password = Column(Boolean, default=False, server_default=sa_false())  # set by another person: change at next sign-in
     created_at = _ts()
 
 
@@ -121,6 +122,7 @@ class Document(Base):
     classification_confirmed_at = Column(DateTime(timezone=True))
     superseded_by_id = Column(Integer, nullable=True)
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)  # NULL = ONCM resource
+    checklist_item_id = Column(Integer, ForeignKey("onboarding_checklists.id"), nullable=True, index=True)  # participant upload for this item
     category = Column(String(60), nullable=False)
     title = Column(String(255), nullable=False)
     doc_type = Column(String(100))

@@ -35,13 +35,15 @@ def dashboard(u: User = Depends(participant_user), db: Session = Depends(get_db)
     o = _org(db, u)
     admin = db.get(User, o.assigned_admin_id) if o.assigned_admin_id else None
     cl = db.query(ChecklistItem).filter_by(organization_id=o.id).order_by(ChecklistItem.id).all()
-    docs = db.query(Document).filter_by(organization_id=o.id, origin="participant").all()
+    docs = db.query(Document).filter_by(organization_id=o.id, origin="participant").order_by(Document.id).all()
+    for_item = {d.checklist_item_id: d for d in docs if d.checklist_item_id and d.status not in ("superseded",)}
     return {
         "organization": {"id": o.id, "name": o.name, "actor_type": o.actor_type, "stage": o.stage,
                          "waiting_on": o.waiting_on, "updated_at": row(o)["updated_at"]},
         "stages": STAGES,
         "oncm_contact": {"name": admin.name, "email": admin.email} if admin else {"name": "ONCM team", "email": shared_mailbox()},
-        "checklist": [{"id": c.id, "title": c.title, "done": c.done} for c in cl],
+        "checklist": [{"id": c.id, "title": c.title, "done": c.done,
+                       "document": ({"id": x.id, "status": x.status} if (x := for_item.get(c.id)) else None)} for c in cl],
         "docs_needing_action": [doc_out(db, d, True) for d in docs if d.status in ("changes_requested", "rejected")],
         "docs_with_oncm": [doc_out(db, d, True) for d in docs if d.status in ("submitted", "under_review")],
         "deadlines": [{"title": t.title, "due_date": row(t)["due_date"]} for t in
@@ -62,15 +64,19 @@ def my_documents(u: User = Depends(participant_user), db: Session = Depends(get_
 
 
 @router.post("/documents", status_code=201)
-def upload(category: str = Form(...), title: str = Form(...), doc_type: str = Form(""),
+def upload(category: str = Form(...), title: str = Form(...), doc_type: str = Form(""), checklist_item_id: Optional[int] = Form(None),
            file: UploadFile = File(...), u: User = Depends(participant_user), db: Session = Depends(get_db)):
     o = _org(db, u)
     if category not in CATEGORIES:
         raise HTTPException(400, "Unknown category")
+    item = db.get(ChecklistItem, checklist_item_id) if checklist_item_id else None
+    if checklist_item_id and (not item or item.organization_id != o.id):
+        raise HTTPException(400, "Unknown checklist item")
     upload_ = read_validated(file)
     d = new_document(db, FOLDER_TO_CODE[category], organization_id=o.id, category=category, title=title.strip()[:250],
                      doc_type=doc_type[:100], origin="participant", status="submitted", created_by=u.id,
-                     assigned_reviewer_id=o.assigned_admin_id, access_level="restricted")  # submissions are confidential by default
+                     assigned_reviewer_id=o.assigned_admin_id, access_level="restricted",  # submissions are confidential by default
+                     checklist_item_id=item.id if item else None)
     add_version(db, d, upload_, u)
     assign_serial(db, d)
     o.waiting_on = "oncm"

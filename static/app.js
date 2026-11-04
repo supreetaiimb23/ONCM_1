@@ -15,13 +15,83 @@ const BADGE = { draft: 'bg-neutral-100 text-neutral-600', submitted: 'bg-neutral
   open: 'bg-neutral-200 text-neutral-800', in_progress: 'bg-amber-100 text-amber-800', done: 'bg-emerald-100 text-emerald-800' };
 const badge = (s) => `<span class="badge ${BADGE[s] || 'bg-neutral-200'}">${esc(label(s))}</span>`;
 
+function errText(j, fallback) {
+  if (!j || !j.detail) return fallback;
+  return typeof j.detail === 'string' ? j.detail : j.detail.map(x => { const custom = String(x.msg).startsWith('Value error, '); const fld = (x.loc || []).slice(-1)[0]; const msg = String(x.msg).replace(/^Value error, /, ''); return (!custom && typeof fld === 'string' && fld !== 'body') ? label(fld) + ': ' + msg : msg; }).join('; ') || fallback;
+}
 async function api(path, { method = 'GET', body, form } = {}) {
   const h = { 'X-ONCM': '1' };  // required by the server for cookie-authenticated changes (CSRF protection)
   let payload; if (form) payload = form; else if (body) { h['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
   const r = await fetch('/api' + path, { method, headers: h, body: payload });
   if (r.status === 401 && S.user) { S.user = null; S.meta = null; boot(); throw new Error('Session expired. Please sign in again.'); }
-  if (!r.ok) { let m = r.statusText; try { const j = await r.json(); m = typeof j.detail === 'string' ? j.detail : (j.detail || []).map(x => { const custom = String(x.msg).startsWith('Value error, '); const fld = (x.loc || []).slice(-1)[0]; const msg = String(x.msg).replace(/^Value error, /, ''); return (!custom && typeof fld === 'string' && fld !== 'body') ? label(fld) + ': ' + msg : msg; }).join('; ') || m; } catch {} throw new Error(m); }
+  if (!r.ok) { let m = r.statusText; try { m = errText(await r.json(), m); } catch {} throw new Error(m); }
   const ct = r.headers.get('content-type') || ''; return ct.includes('json') ? r.json() : r;
+}
+/* File uploads: XHR (fetch cannot report upload progress). onProgress gets 0..1. */
+function uploadForm(path, form, onProgress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest(); x.open('POST', '/api' + path); x.setRequestHeader('X-ONCM', '1');
+    x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress?.(e.loaded / e.total); };
+    x.onload = () => { let j = null; try { j = JSON.parse(x.responseText); } catch {}
+      if (x.status >= 200 && x.status < 300) return resolve(j);
+      if (x.status === 401 && S.user) { S.user = null; boot(); return reject(new Error('Session expired. Please sign in again.')); }
+      reject(new Error(errText(j, x.status === 413 ? 'The file is too large.' : 'Upload failed (' + x.status + '). Please try again.'))); };
+    x.onerror = () => reject(new Error('Upload interrupted. Check your internet connection and try again.'));
+    x.send(form);
+  });
+}
+const LIMITS = () => S.user?.upload_limits || { max_mb: 25, extensions: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'png', 'jpg', 'jpeg', 'txt'] };
+const mb = (n) => (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+/* Checks a chosen file before anything is sent; returns an error message or ''. */
+function fileProblem(file) {
+  if (!file) return '';
+  const L = LIMITS(), ext = (file.name.split('.').pop() || '').toLowerCase();
+  if (!L.extensions.includes(ext)) return `.${ext} files can't be uploaded. Use ${L.extensions.join(', ').toUpperCase()}.`;
+  if (file.size > L.max_mb * 1048576) return `This file is ${mb(file.size)}; the limit is ${L.max_mb} MB. Compress it or split it into parts.`;
+  if (file.size === 0) return 'This file is empty.';
+  return '';
+}
+/* File field + live check + progress bar, shared by Upload and Replace. */
+function fileField() {
+  const L = LIMITS();
+  return `<label class="l" for="up-file">File</label>
+  <input class="field" type="file" id="up-file" name="file" required accept="${L.extensions.map(e => '.' + e).join(',')}">
+  <p class="text-xs text-neutral-600 mt-1" id="up-info">${esc(L.extensions.join(', ').toUpperCase())} · up to ${L.max_mb} MB</p>
+  <div id="up-prog" class="hidden mt-3"><div class="h-2 rounded bg-neutral-200 overflow-hidden"><div id="up-bar" class="h-2 bg-brand-600 transition-all" style="width:0%"></div></div>
+  <p class="text-xs text-neutral-700 mt-1" id="up-pct" aria-live="polite"></p></div>`;
+}
+function wireFileField(onPick) {
+  const inp = $('#up-file'), info = $('#up-info'), L = LIMITS();
+  inp.addEventListener('change', () => { const f = inp.files[0], bad = fileProblem(f);
+    info.className = 'text-xs mt-1 ' + (bad ? 'text-red-700 font-semibold' : 'text-neutral-600');
+    info.textContent = bad || (f ? `${f.name} · ${mb(f.size)}` : `${L.extensions.join(', ').toUpperCase()} · up to ${L.max_mb} MB`);
+    if (bad) inp.value = ''; else if (f) onPick?.(f); });
+}
+/* Sends the form with progress; keeps the dialog open and the button disabled until it finishes. */
+async function sendUpload(f, path, doneMsg) {
+  const file = f.querySelector('#up-file').files[0], bad = fileProblem(file);
+  if (bad) throw new Error(bad);
+  const btn = f.querySelector('button.btn-primary'), label0 = btn.textContent, t0 = Date.now();
+  btn.disabled = true; $('#up-prog').classList.remove('hidden'); window.onbeforeunload = () => true; S.uploading = true;
+  const show = (p) => { $('#up-bar').style.width = Math.round(p * 100) + '%'; const secs = (Date.now() - t0) / 1000, left = p > 0.02 ? secs / p - secs : null;
+    $('#up-pct').textContent = p >= 1 ? 'Saving and checking the file…' : `Uploading ${Math.round(p * 100)}% of ${mb(file.size)}${left !== null && left > 3 ? ` · about ${Math.ceil(left)} s left` : ''}`;
+    btn.textContent = p >= 1 ? 'Finishing…' : `Uploading ${Math.round(p * 100)}%`; };
+  show(0);
+  try { await uploadForm(path, new FormData(f), show); }
+  catch (e) { $('#up-prog').classList.add('hidden'); throw e; }
+  finally { btn.disabled = false; btn.textContent = label0; window.onbeforeunload = null; S.uploading = false; }
+  toast(doneMsg); closeModal(); go();
+}
+async function loadMembers(orgId) {
+  const ms = await api(`/admin/organizations/${orgId}/members`); const box = $('#org-members'); if (!box) return;
+  box.innerHTML = ms.length ? `<ul class="divide-y">${ms.map(m => `<li class="flex items-center gap-2 py-1.5"><span class="flex-1">${esc(m.name)} <span class="text-neutral-600">${esc(m.email)}</span></span>
+    ${!m.active ? badge('failed').replace('Failed', 'Inactive') : m.pending_invite ? '<span class="badge bg-amber-100 text-amber-800">Not signed in yet</span>' : '<span class="badge bg-emerald-100 text-emerald-800">Active</span>'}
+    ${m.active ? `<button type="button" class="btn btn-ghost py-1" data-act="u-link" data-id="${m.id}">${m.pending_invite ? 'Invite link' : 'Reset link'}</button>` : ''}</li>`).join('')}</ul>` : empty('No people yet.');
+}
+function linkModal(title, intro, link) {
+  modal(title, `<p class="text-sm">${intro}</p><input class="field mt-3 font-mono text-xs" id="lk" readonly value="${esc(link)}">
+  <div class="flex gap-2 mt-3"><button class="btn btn-primary" data-act="copy-link">Copy link</button></div>
+  <p class="text-xs text-neutral-600 mt-2">Valid 7 days and works once. Send it only to this person (email or WhatsApp to their own number).</p>`);
 }
 function toast(msg, bad) {
   const el = document.createElement('div');
@@ -33,7 +103,7 @@ function modal(title, html) {
   $('#dlg-body').innerHTML = `<div class="p-6"><div class="flex justify-between items-start mb-2"><h2 class="font-display text-xl font-bold">${esc(title)}</h2>
   <button class="btn btn-ghost" data-act="close" aria-label="Close">Close</button></div>${html}</div>`; $('#dlg').showModal();
 }
-const closeModal = () => $('#dlg').close();
+const closeModal = () => { if (S.uploading && !confirm('An upload is still in progress. Stop it and close?')) return; $('#dlg').close(); };
 async function download(path) { const r = await api(path); window.location.href = r.url; }
 async function downloadFile(path, fallback) {
   const r = await api(path); const b = await r.blob(); const cd = r.headers.get('content-disposition') || '';
@@ -76,15 +146,43 @@ function loginView() {
   $('#app').innerHTML = authShell(`${card(`<h2 class="font-display text-2xl font-bold mb-1">Sign in</h2>
   <form id="f-login"><label class="l" for="e">Email</label><input class="field" id="e" type="email" required autocomplete="username">
   <label class="l" for="p">Password</label><input class="field" id="p" type="password" required autocomplete="current-password">
-  <button class="btn btn-primary w-full justify-center mt-5">Sign in</button></form><div id="sso"></div>
+  <button class="btn btn-primary w-full justify-center mt-5">Sign in</button></form>
+  <p class="text-sm mt-3 text-right"><a href="#" class="underline" id="forgot">Forgot password?</a></p><div id="sso"></div>
   <p class="text-sm mt-4">New ONCM Consortium Partner Firm? <a href="#/join" class="underline font-semibold text-brand-600">Submit an Onboarding Request</a></p>`)}
   <p class="text-center text-sm mt-4"><a href="#/public" class="underline">Browse public resources</a></p>`);
   api('/health').then(h => { if ((h.sso || []).includes('microsoft') && $('#sso')) $('#sso').innerHTML =
     `<div class="flex items-center gap-3 my-4 text-xs text-neutral-500"><span class="flex-1 border-t"></span>or<span class="flex-1 border-t"></span></div>
     <a class="btn btn-ghost w-full justify-center" href="/api/auth/sso/microsoft/start"><svg width="16" height="16" viewBox="0 0 21 21" aria-hidden="true"><path fill="#f25022" d="M1 1h9v9H1z"/><path fill="#00a4ef" d="M1 11h9v9H1z"/><path fill="#7fba00" d="M11 1h9v9h-9z"/><path fill="#ffb900" d="M11 11h9v9h-9z"/></svg>Sign in with Microsoft</a>`; }).catch(() => {});
+  $('#forgot').onclick = (e) => { e.preventDefault(); forgotView($('#e').value); };
   $('#f-login').onsubmit = run(async (e) => { e.preventDefault();
     const r = await api('/auth/login', { method: 'POST', body: { email: $('#e').value, password: $('#p').value } });
     r.mfa_required ? mfaLoginView(r.mfa_token) : setSession(); });
+}
+function forgotView(email) {
+  $('#app').innerHTML = authShell(card(`<h2 class="font-display text-2xl font-bold mb-1">Reset your password</h2>
+  <p class="text-sm text-neutral-600">Enter the email you sign in with. We'll send a link to set a new password.</p>
+  <form id="f-forgot"><label class="l" for="fe">Email</label><input class="field" id="fe" type="email" required autocomplete="username" value="${esc(email || '')}">
+  <button class="btn btn-primary w-full justify-center mt-5">Send reset link</button></form><div id="forgot-msg"></div>
+  <p class="text-sm mt-4"><a href="#" class="underline" id="forgot-back">Back to sign in</a></p>`));
+  $('#forgot-back').onclick = (e) => { e.preventDefault(); loginView(); };
+  $('#f-forgot').onsubmit = run(async (e) => { e.preventDefault();
+    const r = await api('/auth/forgot-password', { method: 'POST', body: { email: $('#fe').value.trim() } });
+    $('#forgot-msg').innerHTML = `<p class="text-sm mt-4 bg-neutral-100 rounded p-3">${esc(r.message)}</p>`; });
+}
+/* Temporary password set by someone else: replace it before anything else. */
+function mustChangeView() {
+  $('#app').innerHTML = authShell(card(`<h2 class="font-display text-2xl font-bold mb-1">Choose your own password</h2>
+  <p class="text-sm text-neutral-600">You signed in with a temporary password. Replace it to continue.</p>
+  <form id="f-mc"><label class="l" for="mc0">Temporary password</label><input class="field" id="mc0" type="password" required autocomplete="current-password">
+  <label class="l" for="mc1">New password (10+ characters)</label><input class="field" id="mc1" type="password" minlength="10" maxlength="128" required autocomplete="new-password">
+  <label class="l" for="mc2">Type it again</label><input class="field" id="mc2" type="password" minlength="10" maxlength="128" required autocomplete="new-password">
+  <button class="btn btn-primary w-full justify-center mt-5">Save and continue</button></form>
+  <p class="text-sm mt-4"><a href="#" class="underline" id="mc-out">Sign out</a></p>`));
+  $('#mc-out').onclick = (e) => { e.preventDefault(); logout(); };
+  $('#f-mc').onsubmit = run(async (e) => { e.preventDefault();
+    if ($('#mc1').value !== $('#mc2').value) throw new Error('The two new passwords do not match.');
+    await api('/auth/change-password', { method: 'POST', body: { current_password: $('#mc0').value, new_password: $('#mc1').value } });
+    toast('Password updated'); S.user = null; boot(); });
 }
 function mfaLoginView(token) {
   $('#app').innerHTML = authShell(card(`<h2 class="font-display text-2xl font-bold mb-1">Two-step verification</h2>
@@ -288,9 +386,14 @@ async function joinView() {
 }
 function inviteView(token) {
   $('#app').innerHTML = authShell(card(`<h2 class="font-display text-2xl font-bold mb-1">Set your password</h2>
-  <form id="f-inv"><label class="l">New password (10+ characters)</label><input class="field" id="np" type="password" minlength="10" required autocomplete="new-password">
-  <button class="btn btn-primary w-full justify-center mt-5">Activate account</button></form>`));
-  $('#f-inv').onsubmit = run(async (e) => { e.preventDefault(); setSession(await api('/auth/accept-invite', { method: 'POST', body: { token, password: $('#np').value } })); });
+  <form id="f-inv"><label class="l" for="np">New password (10+ characters)</label><input class="field" id="np" type="password" minlength="10" maxlength="128" required autocomplete="new-password">
+  <label class="l" for="np2">Type it again</label><input class="field" id="np2" type="password" minlength="10" maxlength="128" required autocomplete="new-password">
+  <label class="flex gap-2 mt-2 text-sm"><input type="checkbox" id="np-show"> Show password</label>
+  <button class="btn btn-primary w-full justify-center mt-5">Save password and sign in</button></form>`));
+  $('#np-show').onchange = (e) => { $('#np').type = $('#np2').type = e.target.checked ? 'text' : 'password'; };
+  $('#f-inv').onsubmit = run(async (e) => { e.preventDefault();
+    if ($('#np').value !== $('#np2').value) throw new Error('The two passwords do not match.');
+    setSession(await api('/auth/accept-invite', { method: 'POST', body: { token, password: $('#np').value } })); });
 }
 async function publicView() {
   const r = await api('/public/resources'); S.cache.pubreq = r.request_only;
@@ -345,16 +448,25 @@ const head = (t, sub = '', right = '') => `<div class="flex flex-wrap justify-be
 /* ---------------- participant views ---------------- */
 VIEWS.dash = async () => {
   const d = await api('/me/dashboard'), o = d.organization, idx = d.stages.indexOf(o.stage);
-  const done = d.checklist.filter(c => c.done).length;
+  const done = d.checklist.filter(c => c.done).length; S.cache.checklist = d.checklist;
+  const missing = d.checklist.filter(c => !c.done && !c.document), fix = d.docs_needing_action;
+  const next = fix.length ? `<b>Next step is yours:</b> ${fix.length} document${fix.length > 1 ? 's need' : ' needs'} correcting (see Needs your action).`
+    : missing.length ? `<b>Next step is yours:</b> upload ${missing.length} checklist item${missing.length > 1 ? 's' : ''} below.`
+    : d.docs_with_oncm.length ? '<b>ONCM is reviewing your documents.</b> You will be notified when something changes.' : '<b>Nothing needed from you right now.</b>';
+  const ckState = (c) => c.done ? '<span class="badge bg-emerald-100 text-emerald-800">Approved</span>'
+    : !c.document ? `<button class="btn btn-ghost py-1" data-act="p-upload" data-item="${c.id}">Upload</button>`
+    : ['changes_requested', 'rejected'].includes(c.document.status) ? `<button class="btn btn-ghost py-1" data-act="p-fix" data-id="${c.document.id}">Fix</button>`
+    : badge(c.document.status === 'submitted' ? 'submitted' : c.document.status);
   shell('dash', `${head(o.name, `${o.actor_type} · ONCM contact: ${d.oncm_contact.name} (${d.oncm_contact.email})`)}
   ${card(`<div class="rail">${d.stages.map((s, i) => `<div class="node ${i < idx ? 'done' : i === idx ? 'now' : ''}">${label(s)}</div>`).join('')}</div>
-    <p class="text-sm mt-4">${o.waiting_on === 'participant' ? '<b>Next step is yours.</b> Upload or correct the items below.' : '<b>ONCM is reviewing.</b> You will get an email when something changes.'}</p>`)}
+    <p class="text-sm mt-4">${next}</p>`)}
   <div class="grid md:grid-cols-2 gap-4 mt-4">
     ${card(`<h2 class="font-display font-bold text-lg">Onboarding checklist <span class="text-sm font-sans font-normal">(${done}/${d.checklist.length})</span></h2>
-      <ul class="mt-3 space-y-2 text-sm">${d.checklist.map(c => `<li class="flex gap-2"><span aria-hidden="true">${c.done ? '✔' : '○'}</span><span class="${c.done ? 'line-through text-neutral-600' : ''}">${esc(c.title)}</span></li>`).join('')}</ul>
-      <p class="text-xs text-neutral-600 mt-3">ONCM marks items complete after reviewing your documents.</p>`)}
+      <ul class="mt-3 divide-y text-sm">${d.checklist.map(c => `<li class="flex items-center gap-2 py-2"><span aria-hidden="true">${c.done ? '✔' : '○'}</span><span class="flex-1 ${c.done ? 'text-neutral-600' : ''}">${esc(c.title)}</span>${ckState(c)}</li>`).join('')}</ul>
+      <p class="text-xs text-neutral-600 mt-3">An item is ticked when ONCM approves the document you uploaded for it.</p>`)}
     ${card(`<h2 class="font-display font-bold text-lg">Needs your action</h2>
-      ${d.docs_needing_action.length ? d.docs_needing_action.map(x => `<div class="mt-3 text-sm"><b>${esc(x.title)}</b> ${badge(x.status)}<p class="mt-1 bg-brand-50 border border-brand-100 rounded p-2">${esc(x.feedback || 'See your documents page.')}</p></div>`).join('') : empty('Nothing waiting on you.')}
+      ${fix.length ? fix.map(x => `<div class="mt-3 text-sm"><b>${esc(x.title)}</b> ${badge(x.status)}<p class="mt-1 bg-brand-50 border border-brand-100 rounded p-2">${esc(x.feedback || 'See your documents page.')}</p><button class="btn btn-ghost mt-2" data-act="p-fix" data-id="${x.id}">Upload corrected version</button></div>`).join('')
+        : missing.length ? `<p class="text-sm mt-3">${missing.length} checklist item${missing.length > 1 ? 's' : ''} still to upload.</p><button class="btn btn-primary mt-2" data-act="p-upload" data-item="${missing[0].id}">Upload “${esc(missing[0].title)}”</button>` : empty('Nothing waiting on you.')}
       <h2 class="font-display font-bold text-lg mt-5">With ONCM</h2>
       ${d.docs_with_oncm.length ? d.docs_with_oncm.map(x => `<div class="mt-2 text-sm">${esc(x.title)} ${badge(x.status)}</div>`).join('') : empty('No documents in review.')}
       <h2 class="font-display font-bold text-lg mt-5">Deadlines</h2>
@@ -503,7 +615,7 @@ VIEWS.admins = async () => {
   shell('admins', `${head('Admin accounts', 'Every privilege change needs a reason and is audited.', `<button class="btn btn-primary" data-act="ad-new">New admin</button>`)}
   ${card(`<table class="t"><thead><tr><th>Name</th><th>Role</th><th>Repository access</th><th>Can share</th><th>Can export</th><th>Active</th><th>2-step</th><th></th></tr></thead><tbody>${as.map(a => `<tr><td><b>${esc(a.name)}</b><div class="text-xs">${esc(a.email)}</div></td><td>${label(a.role)}</td>
   <td class="text-xs">${a.role === 'master_admin' ? 'All' : esc((a.repo_access || ['CM', 'POL', 'RES', 'PPD', 'CDP']).join(', '))}</td>
-  <td>${a.can_share ? 'Yes' : 'No'}</td><td>${a.can_export ? 'Yes' : 'No'}</td><td>${a.is_active ? 'Yes' : 'No'}</td><td>${a.mfa_enabled ? 'On' : 'Off'}</td><td class="text-right whitespace-nowrap">${a.mfa_enabled && a.id !== S.user.id ? `<button class="btn btn-ghost" data-act="ad-mfa" data-id="${a.id}">Reset 2-step</button>` : ''}<button class="btn btn-ghost" data-act="ad-edit" data-id="${a.id}">Edit</button></td></tr>`).join('')}</tbody></table>`)}`);
+  <td>${a.can_share ? 'Yes' : 'No'}</td><td>${a.can_export ? 'Yes' : 'No'}</td><td>${a.is_active ? 'Yes' : 'No'}</td><td>${a.mfa_enabled ? 'On' : 'Off'}</td><td class="text-right whitespace-nowrap">${a.is_active && a.id !== S.user.id ? `<button class="btn btn-ghost" data-act="u-link" data-id="${a.id}">Reset link</button>` : ''}${a.mfa_enabled && a.id !== S.user.id ? `<button class="btn btn-ghost" data-act="ad-mfa" data-id="${a.id}">Reset 2-step</button>` : ''}<button class="btn btn-ghost" data-act="ad-edit" data-id="${a.id}">Edit</button></td></tr>`).join('')}</tbody></table>`)}`);
   S.cache.adminlist = as;
 };
 VIEWS.audit = async () => {
@@ -554,10 +666,24 @@ const A = {
   pubdl: run(async (d) => download('/public/resources/' + d.id + '/download')),
   'p-dl': run(async (d) => download('/me/documents/' + d.id + '/download')),
   'r-dl': run(async (d) => download('/me/resources/' + d.id + '/download')),
-  'p-upload': () => modal('Upload document', `<form id="f-pup"><label class="l">Title</label><input class="field" name="title" required>
-    <label class="l">Folder</label><select class="field" name="category">${catOpts()}</select><label class="l">Document type</label><input class="field" name="doc_type" placeholder="e.g. Signed agreement">
-    <label class="l">File (PDF, Word, Excel, image, CSV; max 25 MB)</label><input class="field" type="file" name="file" required><button class="btn btn-primary mt-5">Submit for review</button></form>`),
-  'p-replace': (d) => modal('Upload corrected version', `<form id="f-prep" data-id="${d.id}"><input class="field" type="file" name="file" required><button class="btn btn-primary mt-5">Submit new version</button></form>`),
+  'p-upload': run(async (d) => {
+    const items = (S.cache.checklist || (await api('/me/dashboard')).checklist).filter(c => !c.done && (!c.document || c.id == d.item));
+    modal('Upload document', `<form id="f-pup">
+    <label class="l" for="up-item">Which checklist item is this for?</label><select class="field" id="up-item" name="checklist_item_id"><option value="">Not for a checklist item</option>${opts(items.map(c => [c.id, c.title]), d.item)}</select>
+    <label class="l" for="up-title">Title</label><input class="field" id="up-title" name="title" required maxlength="250" placeholder="Filled in from the checklist item or file name">
+    <label class="l">Folder</label><select class="field" name="category">${catOpts()}</select><label class="l">Document type (optional)</label><input class="field" name="doc_type" placeholder="e.g. Signed agreement">
+    ${fileField()}<button class="btn btn-primary mt-5">Submit for review</button></form>`);
+    const title = $('#up-title'), item = $('#up-item'); let auto = '';
+    const setAuto = (v) => { if (!title.value || title.value === auto) { title.value = v; auto = v; } };
+    item.onchange = () => { const c = items.find(x => x.id == item.value); if (c) setAuto(c.title); };
+    item.onchange();
+    wireFileField((file) => { if (!item.value) setAuto(file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim()); });
+  }),
+  'p-replace': (d) => { const x = (S.cache.mydocs || []).find(m => m.id == d.id) || {};
+    modal('Upload corrected version', `${x.title ? `<p class="text-sm"><b>${esc(x.title)}</b> · now v${x.current_version}; this becomes v${x.current_version + 1}.</p>` : ''}
+    ${x.feedback ? `<div class="mt-3 bg-brand-50 border border-brand-100 rounded p-3 text-sm"><p class="font-semibold">What ONCM asked you to change</p><p class="mt-1 whitespace-pre-line">${esc(x.feedback)}</p></div>` : ''}
+    <form id="f-prep" data-id="${d.id}" class="mt-2">${fileField()}<button class="btn btn-primary mt-5">Submit new version</button></form>`); wireFileField(); },
+  'p-fix': run(async (d) => { S.cache.mydocs = await api('/me/documents'); A['p-replace'](d); }),
   'p-versions': (d) => { const x = S.cache.mydocs.find(m => m.id == d.id); modal('Version history', `<ul class="text-sm space-y-2 mt-3">${x.versions.map(v => `<li class="flex justify-between"><span>v${v.version} · ${esc(v.filename)} · ${fmt(v.created_at)}</span><button class="btn btn-ghost" data-act="p-dlv" data-id="${x.id}" data-v="${v.version}">Download</button></li>`).join('')}</ul>`); },
   'p-dlv': run(async (d) => download(`/me/documents/${d.id}/download?version=${d.v}`)),
   'j-view': (d) => {
@@ -587,11 +713,17 @@ const A = {
     <div class="sm:col-span-3"><label class="l">Reason (needed for overrides / suspensions)</label><input class="field" name="reason"></div>
     <div class="sm:col-span-3 flex gap-2 flex-wrap"><button class="btn btn-primary">Save</button>${master ? `<button type="button" class="btn btn-ghost" data-act="o-force" data-id="${o.id}">Force Live (override)</button><button type="button" class="btn btn-danger" data-act="o-suspend" data-id="${o.id}" data-s="${o.status === 'active' ? 'suspended' : 'active'}">${o.status === 'active' ? 'Suspend access' : 'Restore access'}</button>` : ''}
     <button type="button" class="btn btn-ghost" data-act="o-remind" data-id="${o.id}">Email missing-document reminder</button></div></form>
+    <h3 class="font-semibold mt-5">People</h3><div id="org-members" class="text-sm mt-2">Loading…</div>
+    <form id="f-addm" data-id="${o.id}" class="grid sm:grid-cols-3 gap-2 mt-2"><input class="field" name="name" placeholder="Name" required minlength="2"><input class="field" name="email" type="email" placeholder="Email" required><button class="btn btn-ghost">Add person</button></form>
     <h3 class="font-semibold mt-5">Checklist</h3><ul class="text-sm mt-2 space-y-1">${o.checklist.map(c => `<li><label class="flex gap-2"><input type="checkbox" data-act="c-toggle" data-id="${c.id}" ${c.done ? 'checked' : ''}> ${esc(c.title)}</label></li>`).join('')}</ul>
     <h3 class="font-semibold mt-5">Documents</h3>${o.documents.length ? o.documents.map(x => `<div class="text-sm flex justify-between py-1"><span>${esc(x.title)} ${badge(x.status)}</span><button class="btn btn-ghost" data-act="d-open" data-id="${x.id}">Review</button></div>`).join('') : empty('No documents yet.')}`);
+    loadMembers(o.id);
   }),
   'o-force': run(async (d) => { const r = $('#f-op [name=reason]').value; await api('/admin/organizations/' + d.id, { method: 'PATCH', body: { stage: 'live', override: true, reason: r } }); toast('Moved to Live'); closeModal(); go(); }),
   'o-suspend': run(async (d) => { const r = $('#f-op [name=reason]').value; await api('/admin/organizations/' + d.id, { method: 'PATCH', body: { status: d.s, reason: r } }); toast('Updated'); closeModal(); go(); }),
+  'copy-link': run(async () => { await navigator.clipboard.writeText($('#lk').value); toast('Link copied'); }),
+  'u-link': run(async (d) => { const r = await api(`/admin/users/${d.id}/password-link`, { method: 'POST' });
+    linkModal('Sign-in link', `Share this with <b>${esc(r.email)}</b>. They open it, choose a password, and are signed in. Use it for a first sign-in or a forgotten password.`, r.link); }),
   'o-remind': run(async (d) => { const r = await api(`/admin/organizations/${d.id}/missing-docs-reminder`, { method: 'POST' }); toast(`Reminder queued (${r.sent_for} items)`); }),
   'c-toggle': run(async (d, el) => { await api(`/admin/checklist/${d.id}/toggle?done=${el.checked}`, { method: 'POST' }); toast('Checklist updated'); }),
   'a-upload': () => modal('New repository document', `<p class="text-sm">Starts as an internal draft and receives a code such as ONCM-POL-2026-V1-0003. Nothing is visible outside the ONCM team until it is reviewed, approved and published.</p>
@@ -679,7 +811,8 @@ const A = {
     await api('/master/alert-recipients/' + d.id, { method: 'DELETE' }); toast('Recipient removed'); go(); }),
   'al-retry': run(async (d) => { await api(`/master/alert-log/${d.id}/retry`, { method: 'POST' }); toast('Retry queued'); setTimeout(go, 1500); }),
   'ad-new': () => modal('New admin', `<form id="f-an"><label class="l">Name</label><input class="field" name="name" required><label class="l">Email</label><input class="field" type="email" name="email" required>
-    <label class="l">Temporary password (10+ characters)</label><input class="field" type="password" name="password" minlength="10" required><label class="l">Role</label><select class="field" name="role"><option value="secondary_admin">Secondary Admin</option><option value="master_admin">Master Admin</option></select>
+    <label class="l">Temporary password (10+ characters)</label><input class="field" type="password" name="password" minlength="10" required>
+    <p class="text-xs text-neutral-600 mt-1">Tell them this password yourself. They must choose their own the first time they sign in.</p><label class="l">Role</label><select class="field" name="role"><option value="secondary_admin">Secondary Admin</option><option value="master_admin">Master Admin</option></select>
     <label class="l">Repository categories this admin may open</label><div class="grid sm:grid-cols-2">${checks('repo', Object.entries(S.meta.repo_categories).map(([k, v]) => [k, `${k} · ${v}`]), ['CM', 'POL', 'RES', 'PPD', 'CDP'])}</div>
     <label class="flex gap-2 mt-3 text-sm"><input type="checkbox" name="can_share"> May configure access, publish and approve access requests</label><label class="flex gap-2 mt-1 text-sm"><input type="checkbox" name="can_export"> May export Consortium Activity Tracking Reports</label>
     <label class="l">Reason (required for Master Admin)</label><input class="field" name="reason"><button class="btn btn-primary mt-5">Create admin</button></form>`),
@@ -718,10 +851,13 @@ document.addEventListener('click', (e) => { const el = e.target.closest('[data-a
 document.addEventListener('change', (e) => { const el = e.target.closest('[data-act]'); if (el && (el.tagName === 'SELECT' || el.type === 'checkbox')) A[el.dataset.act]?.(el.dataset, el); });
 const fd = (f) => Object.fromEntries([...new FormData(f)].map(([k, v]) => [k, v === '' ? null : v]));
 const FORMS = {
+  'f-addm': async (f) => { const r = await api(`/admin/organizations/${f.dataset.id}/members`, { method: 'POST', body: fd(f) });
+    f.reset(); await loadMembers(f.dataset.id);
+    toast('Person added. Copy their invite link from the list if email is not set up.'); void r; },
   'f-mfa-codes': async (f) => { const r = await api('/auth/mfa/recovery-codes', { method: 'POST', body: fd(f) }); showRecoveryCodes($('#mfa-box'), r.recovery_codes, () => VIEWS.account()); },
   'f-mfa-off': async (f) => { await api('/auth/mfa/disable', { method: 'POST', body: fd(f) }); toast('Two-step verification is off'); VIEWS.account(); },
-  'f-pup': async (f) => { await api('/me/documents', { method: 'POST', form: new FormData(f) }); toast('Submitted for review'); closeModal(); go(); },
-  'f-prep': async (f) => { await api(`/me/documents/${f.dataset.id}/versions`, { method: 'POST', form: new FormData(f) }); toast('New version submitted'); closeModal(); go(); },
+  'f-pup': (f) => sendUpload(f, '/me/documents', 'Submitted for review. ONCM will review it and you will be notified.'),
+  'f-prep': (f) => sendUpload(f, `/me/documents/${f.dataset.id}/versions`, 'New version submitted for review'),
   'f-q': async (f) => { const r = await api('/me/questions', { method: 'POST', body: fd(f) }); toast(r.message); f.reset(); },
   'f-cc': async (f) => { const r = await api('/me/contact-change', { method: 'POST', body: fd(f) }); toast(r.message); f.reset(); },
   'f-pw': async (f) => { await api('/auth/change-password', { method: 'POST', body: fd(f) }); toast('Password updated'); f.reset(); },
@@ -788,6 +924,7 @@ async function boot() {
   if (qs.get('sso') === 'mfa') { history.replaceState(null, '', '/'); return mfaLoginView(''); }
   try { S.user = await api('/auth/me'); } catch { S.user = null; }
   if (S.user) {
+    if (S.user.must_change_password) return mustChangeView();
     if (S.user.mfa_setup_required) return mfaRequiredView();
     try { if (isAdmin()) S.meta = await api('/admin/meta'); return go(); } catch (e) { toast(e.message, true); }
   }
